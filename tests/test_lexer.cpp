@@ -28,6 +28,16 @@ std::string show(const Args& words) {
     return text + "]";
 }
 
+// Words stay as they are; a redirection operator is shown as OP(<text>) so the
+// expected lists can tell `>` the operator from `">"` the word.
+Args describe(const std::vector<Token>& tokens) {
+    Args out;
+    for (const Token& t : tokens) {
+        out.push_back(t.is_operator ? "OP(" + t.text + ")" : t.text);
+    }
+    return out;
+}
+
 }  // namespace
 
 int main() {
@@ -111,6 +121,39 @@ int main() {
         {R"X(echo '~')X", {"echo", "~"}, false},
         {R"X(echo \~)X", {"echo", "~"}, false},
 
+        // --- redirection operators (unquoted only) ---
+        {"echo hi > out", {"echo", "hi", "OP(>)", "out"}, false},
+        {"echo hi >out", {"echo", "hi", "OP(>)", "out"}, false},
+        {"echo hi>out", {"echo", "hi", "OP(>)", "out"}, false},
+        {"echo hi >> log", {"echo", "hi", "OP(>>)", "log"}, false},
+        {"echo hi>>log", {"echo", "hi", "OP(>>)", "log"}, false},
+        {"cat < in", {"cat", "OP(<)", "in"}, false},
+        {"cat<in", {"cat", "OP(<)", "in"}, false},
+        {"ls 2> err", {"ls", "OP(2>)", "err"}, false},
+        {"ls 2>err", {"ls", "OP(2>)", "err"}, false},
+        {"cat < in > out", {"cat", "OP(<)", "in", "OP(>)", "out"}, false},
+        {"> out echo hi", {"OP(>)", "out", "echo", "hi"}, false},
+        {"echo hi > $NX_VAR", {"echo", "hi", "OP(>)", "value"}, false},
+        {"echo > > x", {"echo", "OP(>)", "OP(>)", "x"}, false},
+        {"echo >>> x", {"echo", "OP(>>)", "OP(>)", "x"}, false},
+        {"echo >", {"echo", "OP(>)"}, false},
+
+        // --- "2" is a redirection only at the start of a word, directly before > ---
+        {"echo 2 > f", {"echo", "2", "OP(>)", "f"}, false},
+        {"echo a2>f", {"echo", "a2", "OP(>)", "f"}, false},
+        {"echo 22>f", {"echo", "22", "OP(>)", "f"}, false},
+        {"echo 2", {"echo", "2"}, false},
+        {"echo 2>>f", {"echo", "OP(2>)", "OP(>)", "f"}, false},
+        {"echo \"2\">f", {"echo", "2", "OP(>)", "f"}, false},
+
+        // --- quoted or escaped operators are ordinary text ---
+        {R"X(echo ">" '<' ">>" "2>")X", {"echo", ">", "<", ">>", "2>"}, false},
+        {R"X(echo \> \< \>\>)X", {"echo", ">", "<", ">>"}, false},
+        {R"X(echo a">"b)X", {"echo", "a>b"}, false},
+        {R"X(echo "hi" > "my file")X", {"echo", "hi", "OP(>)", "my file"}, false},
+        {R"X(echo hi > 'a>b')X", {"echo", "hi", "OP(>)", "a>b"}, false},
+        {R"X(echo "unterminated > )X", {}, true},
+
         // --- syntax errors ---
         {R"X(echo "abc)X", {}, true},
         {R"X(echo 'abc)X", {}, true},
@@ -124,9 +167,10 @@ int main() {
 
     int failures = 0;
     for (const Case& c : cases) {
-        Args words;
+        std::vector<Token> tokens;
         std::string error;
-        bool ok = tokenize(c.input, status, words, error);
+        bool ok = tokenize(c.input, status, tokens, error);
+        Args words = describe(tokens);
         bool pass = c.expect_error ? (!ok && !error.empty()) : (ok && words == c.expected);
         if (!pass) {
             ++failures;

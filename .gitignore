@@ -1,3 +1,4 @@
-nexusshell
 *.o
+nexusshell
 tests/test_lexer
+tests/test_parser

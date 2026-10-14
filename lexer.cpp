@@ -79,9 +79,9 @@ bool expand_dollar(const std::string& line, size_t& i, int last_status,
 
 }  // namespace
 
-bool tokenize(const std::string& line, int last_status, Args& words,
+bool tokenize(const std::string& line, int last_status, std::vector<Token>& tokens,
               std::string& error) {
-    words.clear();
+    tokens.clear();
     error.clear();
 
     std::string word;
@@ -92,7 +92,7 @@ bool tokenize(const std::string& line, int last_status, Args& words,
     // that produced nothing (e.g. $UNSET) therefore vanishes, while "" stays.
     auto finish_word = [&]() {
         if (in_word && (quoted || !word.empty())) {
-            words.push_back(word);
+            tokens.push_back(Token{word, false});
         }
         word.clear();
         in_word = false;
@@ -107,6 +107,27 @@ bool tokenize(const std::string& line, int last_status, Args& words,
         if (c == ' ' || c == '\t' || c == '\n') {
             finish_word();
             ++i;
+            continue;
+        }
+
+        // Redirection operators, only when unquoted: <  >  >>  and 2>
+        // "2>" counts only at the start of a word, so `a2>f` is the word
+        // "a2" followed by ">", and `echo 2 > f` passes "2" as an argument.
+        char ahead = (i + 1 < line.size()) ? line[i + 1] : '\0';
+        if (c == '<' || c == '>' || (c == '2' && !in_word && ahead == '>')) {
+            finish_word();  // an operator also ends the word before it: echo hi>f
+            std::string op;
+            if (c == '2') {
+                op = "2>";
+                i += 2;
+            } else if (c == '>' && ahead == '>') {
+                op = ">>";
+                i += 2;
+            } else {
+                op = std::string(1, c);
+                i += 1;
+            }
+            tokens.push_back(Token{op, true});
             continue;
         }
 

@@ -1,16 +1,20 @@
 // NexusShell - main.cpp
-// Phase 4: shell loop + lexer + external commands + built-ins.
+// Phase 5: shell loop + lexer + parser + redirection + external commands +
+// built-ins.
 //
-// Each line is tokenized (lexer.cpp: quotes, escapes, $VAR, ~), then run as
-// either a built-in (inside the shell process, see builtins.cpp) or an
-// external program (in a forked child).
+// Each line is tokenized (lexer.cpp: quotes, escapes, $VAR, ~), parsed into a
+// Command (parser.cpp: argv + redirections), then run as either a built-in
+// (inside the shell process, see builtins.cpp) or an external program (in a
+// forked child). Redirections (redirect.cpp) are set up with open()/dup2().
 //
 // Not yet supported:
-//   - pipes, redirection, background jobs (-> Phases 5-7)
+//   - pipes and background jobs (-> Phases 6-7)
 //   - signal handling (-> Phase 8)
 
 #include "builtins.h"
 #include "lexer.h"
+#include "parser.h"
+#include "redirect.h"
 
 #include <cerrno>
 #include <cstring>
@@ -27,17 +31,17 @@
 //   128+N    child was killed by signal N
 //   127      command not found
 //   126      found but could not be executed (e.g. permission denied)
-static int run_command(const Args& args) {
+static int run_command(const Command& command) {
     // execvp wants a NULL-terminated array of char*, not std::string.
     std::vector<char*> argv;
-    for (const std::string& arg : args) {
+    for (const std::string& arg : command.argv) {
         argv.push_back(const_cast<char*>(arg.c_str()));
     }
     argv.push_back(nullptr);
 
     // Flush our buffered output first so it can't be duplicated or
     // reordered relative to the child's output.
-    std::cout.flush();
+    flush_output();
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -47,6 +51,14 @@ static int run_command(const Args& args) {
 
     if (pid == 0) {
         // ---- CHILD ----
+        // Rewire stdin/stdout/stderr here, in the child only, so the shell's
+        // own descriptors stay untouched. exec keeps them open.
+        std::string redirect_error;
+        if (!apply_redirections(command.redirections, redirect_error)) {
+            std::cerr << "nexus: " << redirect_error << std::endl;
+            _exit(1);  // the command is not run when a redirection fails
+        }
+
         execvp(argv[0], argv.data());
 
         // execvp only returns on failure. Save errno before doing any I/O,
@@ -98,25 +110,39 @@ int main() {
         }
         state.history.push_back(input);  // record the raw line, as bash does
 
-        // --- Parse ---
-        Args args;
+        // --- Parse: line -> tokens -> Command ---
+        std::vector<Token> tokens;
+        Command command;
         std::string error;
-        if (!tokenize(input, state.last_status, args, error)) {
+        if (!tokenize(input, state.last_status, tokens, error) ||
+            !parse_command(tokens, command, error)) {
             std::cerr << "nexus: syntax error: " << error << std::endl;
             state.last_status = 2;  // same status bash uses for syntax errors
             continue;
         }
-        if (args.empty()) {
+        if (command.argv.empty() && command.redirections.empty()) {
             continue;  // e.g. a line containing only an unset $VARIABLE
         }
 
         // --- Eval ---
-        // Built-ins run in this very process (no fork); everything else is
-        // an external program run in a child.
-        if (is_builtin(args[0])) {
-            state.last_status = run_builtin(state, args);
+        if (command.argv.empty() || is_builtin(command.argv[0])) {
+            // Built-ins run in this very process (no fork), so there is no
+            // child to rewire: RedirectScope redirects, then puts the original
+            // descriptors back. A line with only redirections (`> file`) has no
+            // command but still creates/truncates the file, as in bash.
+            RedirectScope scope;
+            std::string redirect_error;
+            if (!scope.apply(command.redirections, redirect_error)) {
+                scope.restore();  // report the error on the real stderr
+                std::cerr << "nexus: " << redirect_error << std::endl;
+                state.last_status = 1;
+            } else if (command.argv.empty()) {
+                state.last_status = 0;
+            } else {
+                state.last_status = run_builtin(state, command.argv);
+            }
         } else {
-            state.last_status = run_command(args);
+            state.last_status = run_command(command);
         }
     }
 
