@@ -1,10 +1,14 @@
 // NexusShell - main.cpp
-// Phase 2: Execute external commands using fork() + execvp() + waitpid().
+// Phase 3: shell loop + external commands (fork/execvp/waitpid) + built-ins.
+//
+// Each line is either a built-in (runs inside the shell process, see
+// builtins.cpp) or an external program (runs in a forked child).
 //
 // Still intentionally naive:
-//   - input is split on whitespace only (no quotes/escapes -> Phase 4)
-//   - no built-in commands, so "cd" does not work yet (-> Phase 3)
+//   - input is split on whitespace only (no quotes/escapes/$VAR -> Phase 4)
 //   - no pipes, redirection or background jobs (-> Phases 5-7)
+
+#include "builtins.h"
 
 #include <cerrno>
 #include <cstring>
@@ -18,9 +22,9 @@
 
 // Split a line into whitespace-separated words.
 // "ls   -l  /tmp" -> {"ls", "-l", "/tmp"}
-static std::vector<std::string> split_whitespace(const std::string& line) {
+static Args split_whitespace(const std::string& line) {
     std::istringstream stream(line);
-    std::vector<std::string> words;
+    Args words;
     std::string word;
     while (stream >> word) {
         words.push_back(word);
@@ -34,7 +38,7 @@ static std::vector<std::string> split_whitespace(const std::string& line) {
 //   128+N    child was killed by signal N
 //   127      command not found
 //   126      found but could not be executed (e.g. permission denied)
-static int run_command(const std::vector<std::string>& args) {
+static int run_command(const Args& args) {
     // execvp wants a NULL-terminated array of char*, not std::string.
     std::vector<char*> argv;
     for (const std::string& arg : args) {
@@ -88,10 +92,10 @@ static int run_command(const std::vector<std::string>& args) {
 }
 
 int main() {
+    ShellState state;
     std::string input;
-    int last_status = 0;  // exit status of the most recent command
 
-    while (true) {
+    while (state.running) {
         // --- Read ---
         std::cout << "nexus> ";
         if (!std::getline(std::cin, input)) {
@@ -100,18 +104,21 @@ int main() {
         }
 
         // --- Parse (naive) ---
-        std::vector<std::string> args = split_whitespace(input);
+        Args args = split_whitespace(input);
         if (args.empty()) {
             continue;  // blank or whitespace-only line
         }
+        state.history.push_back(input);
 
         // --- Eval ---
-        if (args[0] == "exit") {
-            break;
+        // Built-ins run in this very process (no fork); everything else is
+        // an external program run in a child.
+        if (is_builtin(args[0])) {
+            state.last_status = run_builtin(state, args);
+        } else {
+            state.last_status = run_command(args);
         }
-
-        last_status = run_command(args);
     }
 
-    return last_status;  // like bash: bare `exit` returns the last status
+    return state.last_status;
 }
