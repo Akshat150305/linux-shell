@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-using Args = std::vector<std::string>;
+#include "lexer.h"  // Args: built-ins receive the lexer's output
 
 // State shared between the main loop and the built-ins.
 struct ShellState {

@@ -1,36 +1,25 @@
 // NexusShell - main.cpp
-// Phase 3: shell loop + external commands (fork/execvp/waitpid) + built-ins.
+// Phase 4: shell loop + lexer + external commands + built-ins.
 //
-// Each line is either a built-in (runs inside the shell process, see
-// builtins.cpp) or an external program (runs in a forked child).
+// Each line is tokenized (lexer.cpp: quotes, escapes, $VAR, ~), then run as
+// either a built-in (inside the shell process, see builtins.cpp) or an
+// external program (in a forked child).
 //
-// Still intentionally naive:
-//   - input is split on whitespace only (no quotes/escapes/$VAR -> Phase 4)
-//   - no pipes, redirection or background jobs (-> Phases 5-7)
+// Not yet supported:
+//   - pipes, redirection, background jobs (-> Phases 5-7)
+//   - signal handling (-> Phase 8)
 
 #include "builtins.h"
+#include "lexer.h"
 
 #include <cerrno>
 #include <cstring>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <vector>
 
 #include <sys/wait.h>  // waitpid, WIFEXITED, WEXITSTATUS, ...
 #include <unistd.h>    // fork, execvp, _exit
-
-// Split a line into whitespace-separated words.
-// "ls   -l  /tmp" -> {"ls", "-l", "/tmp"}
-static Args split_whitespace(const std::string& line) {
-    std::istringstream stream(line);
-    Args words;
-    std::string word;
-    while (stream >> word) {
-        words.push_back(word);
-    }
-    return words;
-}
 
 // Run one external command and wait for it to finish.
 // Returns the shell-style exit status:
@@ -103,12 +92,23 @@ int main() {
             break;
         }
 
-        // --- Parse (naive) ---
-        Args args = split_whitespace(input);
-        if (args.empty()) {
-            continue;  // blank or whitespace-only line
+        // Blank line: just prompt again.
+        if (input.find_first_not_of(" \t") == std::string::npos) {
+            continue;
         }
-        state.history.push_back(input);
+        state.history.push_back(input);  // record the raw line, as bash does
+
+        // --- Parse ---
+        Args args;
+        std::string error;
+        if (!tokenize(input, state.last_status, args, error)) {
+            std::cerr << "nexus: syntax error: " << error << std::endl;
+            state.last_status = 2;  // same status bash uses for syntax errors
+            continue;
+        }
+        if (args.empty()) {
+            continue;  // e.g. a line containing only an unset $VARIABLE
+        }
 
         // --- Eval ---
         // Built-ins run in this very process (no fork); everything else is

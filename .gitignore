@@ -1,2 +1,3 @@
 nexusshell
 *.o
+tests/test_lexer
