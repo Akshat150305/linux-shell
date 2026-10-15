@@ -47,16 +47,33 @@ void move_fd(int from, int to) {
     close(from);
 }
 
+// Does this command redirect descriptor `fd` itself (for example `< file`)?
+bool redirects_fd(const Command& command, int fd) {
+    for (const Redirection& r : command.redirections) {
+        if (r.fd == fd) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Everything one child does before becoming (or running) its command.
 // Never returns: it execs, or exits.
-//   in_fd      pipe read end to use as stdin, or -1
-//   out_fd     pipe write end to use as stdout, or -1
-//   unused_fd  the read end of the pipe we write into; this stage must not
-//              keep it open, or it would be a stray reader. -1 if none.
+//   in_fd       pipe read end to use as stdin, or -1
+//   out_fd      pipe write end to use as stdout, or -1
+//   unused_fd   the read end of the pipe we write into; this stage must not
+//               keep it open, or it would be a stray reader. -1 if none.
+//   null_stdin  first stage of a background job: read /dev/null instead of the
+//               terminal, so the job cannot steal the shell's input
 [[noreturn]] void run_stage(ShellState& state, const Command& command, int in_fd,
-                            int out_fd, int unused_fd) {
+                            int out_fd, int unused_fd, bool null_stdin) {
     if (in_fd >= 0) {
         move_fd(in_fd, STDIN_FILENO);
+    } else if (null_stdin && !redirects_fd(command, STDIN_FILENO)) {
+        int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (null_fd >= 0) {
+            move_fd(null_fd, STDIN_FILENO);
+        }
     }
     if (out_fd >= 0) {
         move_fd(out_fd, STDOUT_FILENO);
@@ -140,7 +157,9 @@ int execute(ShellState& state, const Pipeline& pipeline) {
         return state.last_status;
     }
 
-    if (commands.size() == 1 &&
+    // A single built-in runs in the shell itself, unless it is a background job:
+    // that must be a child, because the shell does not wait for it.
+    if (commands.size() == 1 && !pipeline.background &&
         (commands[0].argv.empty() || is_builtin(commands[0].argv[0]))) {
         return run_in_shell(state, commands[0]);
     }
@@ -180,7 +199,7 @@ int execute(ShellState& state, const Pipeline& pipeline) {
         if (pid == 0) {
             // ---- CHILD ----
             run_stage(state, commands[i], prev_read, last ? -1 : fds[1],
-                      last ? -1 : fds[0]);
+                      last ? -1 : fds[0], pipeline.background && i == 0);
         }
 
         // ---- PARENT ----
@@ -200,7 +219,15 @@ int execute(ShellState& state, const Pipeline& pipeline) {
         close(prev_read);  // only left open if the loop stopped early
     }
 
-    // Wait for every stage so none becomes a zombie. The pipeline's status is
+    // Background: do NOT wait. Remember the children in the job table; they
+    // are collected later (see JobTable::notify_done), or they become zombies.
+    if (pipeline.background && !failed) {
+        int id = state.jobs.add(pids, pipeline.text);
+        std::cout << '[' << id << "] " << pids.back() << std::endl;
+        return 0;
+    }
+
+    // Foreground: wait for every stage so none becomes a zombie. The pipeline's status is
     // the last command's.
     int status = 0;
     for (size_t i = 0; i < pids.size(); ++i) {

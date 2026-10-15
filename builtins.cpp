@@ -162,6 +162,7 @@ int builtin_help(ShellState&, const Args&) {
         "  echo [-n] [text]  print text (-n: no trailing newline)\n"
         "  export [NAME=val] set an environment variable (no args: list all)\n"
         "  history           show commands entered in this session\n"
+        "  jobs              list background jobs (start one with: command &)\n"
         "  clear             clear the screen\n"
         "  help              show this message\n"
         "  exit [n]          leave the shell with status n\n"
@@ -224,6 +225,12 @@ int builtin_export(ShellState&, const Args& args) {
     return status;
 }
 
+// jobs: list background jobs started with `command &`.
+int builtin_jobs(ShellState& state, const Args&) {
+    state.jobs.list();
+    return 0;
+}
+
 // Name -> function table. Adding a built-in = one new line here.
 const std::unordered_map<std::string, BuiltinFn>& builtin_table() {
     static const std::unordered_map<std::string, BuiltinFn> table = {
@@ -231,6 +238,7 @@ const std::unordered_map<std::string, BuiltinFn>& builtin_table() {
         {"echo", builtin_echo},     {"exit", builtin_exit},
         {"clear", builtin_clear},   {"help", builtin_help},
         {"history", builtin_history}, {"export", builtin_export},
+        {"jobs", builtin_jobs},
     };
     return table;
 }

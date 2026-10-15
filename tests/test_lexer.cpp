@@ -161,6 +161,22 @@ int main() {
         {R"X(echo a"|"b a\|b)X", {"echo", "a|b", "a|b"}, false},
         {R"X(echo "a | b" | cat)X", {"echo", "a | b", "OP(|)", "cat"}, false},
 
+        // --- background operator & ---
+        {"sleep 1 &", {"sleep", "1", "OP(&)"}, false},
+        {"sleep 1&", {"sleep", "1", "OP(&)"}, false},
+        {"a & b", {"a", "OP(&)", "b"}, false},
+        {"a&b", {"a", "OP(&)", "b"}, false},
+        {"a && b", {"a", "OP(&)", "OP(&)", "b"}, false},
+        {"&", {"OP(&)"}, false},
+        {"ls | wc &", {"ls", "OP(|)", "wc", "OP(&)"}, false},
+        {"ls 2>&1", {"ls", "OP(2>)", "OP(&)", "1"}, false},
+        {"ls >&2", {"ls", "OP(>)", "OP(&)", "2"}, false},
+        {"echo hi >f &", {"echo", "hi", "OP(>)", "f", "OP(&)"}, false},
+        {R"X(echo "&" '&' \&)X", {"echo", "&", "&", "&"}, false},
+        {R"X(echo a"&"b a\&b)X", {"echo", "a&b", "a&b"}, false},
+        {R"X(echo "a & b" &)X", {"echo", "a & b", "OP(&)"}, false},
+        {R"X(echo hi > "&file")X", {"echo", "hi", "OP(>)", "&file"}, false},
+
         // --- quoted or escaped operators are ordinary text ---
         {R"X(echo ">" '<' ">>" "2>")X", {"echo", ">", "<", ">>", "2>"}, false},
         {R"X(echo \> \< \>\>)X", {"echo", ">", "<", ">>"}, false},

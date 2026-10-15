@@ -1,12 +1,12 @@
 // NexusShell - main.cpp
-// Phase 6: the shell loop. Read a line, then:
+// Phase 7: the shell loop. Before each prompt, report finished background
+// jobs; then read a line and:
 //
 //   tokenize()        lexer.cpp     quotes, escapes, $VAR, ~, operators
 //   parse_pipeline()  parser.cpp    tokens -> commands (argv + redirections)
-//   execute()         executor.cpp  built-ins, fork/exec, pipes, waitpid
+//   execute()         executor.cpp  built-ins, fork/exec, pipes, background
 //
 // Not yet supported:
-//   - background jobs (-> Phase 7)
 //   - signal handling (-> Phase 8)
 
 #include "builtins.h"
@@ -18,11 +18,27 @@
 #include <string>
 #include <vector>
 
+// The command line as shown by `jobs`: trimmed, without the trailing '&'.
+static std::string job_text(std::string line) {
+    const char* blanks = " \t\n";
+    line.erase(line.find_last_not_of(blanks) + 1);
+    if (!line.empty() && line.back() == '&') {
+        line.pop_back();
+        line.erase(line.find_last_not_of(blanks) + 1);
+    }
+    line.erase(0, line.find_first_not_of(blanks));
+    return line;
+}
+
 int main() {
     ShellState state;
     std::string input;
 
     while (state.running) {
+        // --- Report background jobs that finished since the last prompt ---
+        // This also collects them with waitpid(), so they do not stay zombies.
+        state.jobs.notify_done();
+
         // --- Read ---
         std::cout << "nexus> ";
         if (!std::getline(std::cin, input)) {
@@ -49,6 +65,7 @@ int main() {
         if (pipeline.commands.empty()) {
             continue;  // e.g. a line containing only an unset $VARIABLE
         }
+        pipeline.text = job_text(input);
 
         // --- Eval ---
         state.last_status = execute(state, pipeline);

@@ -20,19 +20,24 @@ struct Command {
 // one Command; a blank line (no tokens) is a Pipeline with none.
 struct Pipeline {
     std::vector<Command> commands;
+    bool background = false;  // the line ended with '&': do not wait for it
+    std::string text;         // the line as typed, minus the trailing '&' (for `jobs`)
 };
 
 // Build one Command from tokens that contain no '|'. Redirections may appear
 // anywhere (`> out echo hi` is valid) and are removed from argv.
 //
 // Returns false and sets `error` on a syntax error: a redirection operator
-// with no file name after it, or an unsupported `2>&1`-style target.
+// with no file name after it, an unsupported `2>&1`-style target, or a stray
+// '&' that is not at the end of the line.
 bool parse_command(const std::vector<Token>& tokens, Command& command,
                    std::string& error);
 
-// Split tokens at '|' and parse each part with parse_command().
+// Strip a trailing '&' (marking the pipeline as background), split the rest at
+// '|', and parse each part with parse_command().
 // In a real pipeline (two or more commands) every command needs a program name:
-// `| cat`, `echo |`, `a || b` and `> f | cat` are syntax errors.
+// `| cat`, `echo |`, `a || b` and `> f | cat` are syntax errors. So is a
+// background line with no command (`&`, `> f &`).
 bool parse_pipeline(const std::vector<Token>& tokens, Pipeline& pipeline,
                     std::string& error);
 

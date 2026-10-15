@@ -1,9 +1,9 @@
 CXX      := g++
 CXXFLAGS := -Wall -Wextra -std=c++17 -g
 TARGET   := nexusshell
-SRCS     := main.cpp builtins.cpp lexer.cpp parser.cpp redirect.cpp executor.cpp
+SRCS     := main.cpp builtins.cpp lexer.cpp parser.cpp redirect.cpp executor.cpp jobs.cpp
 OBJS     := $(SRCS:.cpp=.o)
-HEADERS  := builtins.h lexer.h parser.h redirect.h executor.h
+HEADERS  := builtins.h lexer.h parser.h redirect.h executor.h jobs.h
 TEST_BINS := tests/test_lexer tests/test_parser
 
 all: $(TARGET)

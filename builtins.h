@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "jobs.h"
 #include "lexer.h"  // Args: built-ins receive the lexer's output
 
 // State shared between the main loop and the built-ins.
@@ -15,6 +16,7 @@ struct ShellState {
     bool running = true;                  // main loop runs while this is true
     int last_status = 0;                  // exit status of the last command
     std::vector<std::string> history;     // every non-blank line entered
+    JobTable jobs;                        // background jobs (Phase 7)
 };
 
 // True if `name` is one of the built-in commands.

@@ -3,7 +3,7 @@
 // backslash escapes, variable expansion and ~ expansion.
 //
 // Programs never see quotes: `echo "a b"` reaches echo as {"echo", "a b"}.
-// Operators (< > >> 2> |) are recognized only when unquoted, so `echo ">"`
+// Operators (< > >> 2> | &) are recognized only when unquoted, so `echo ">"`
 // prints a character while `echo >` is a redirection.
 
 #ifndef NEXUSSHELL_LEXER_H
@@ -17,7 +17,7 @@ using Args = std::vector<std::string>;
 // One lexical unit: either a finished word (quotes/expansions already
 // applied) or an operator.
 struct Token {
-    std::string text;           // the word, or the operator: "<" ">" ">>" "2>" "|"
+    std::string text;           // the word, or the operator: "<" ">" ">>" "2>" "|" "&"
     bool is_operator = false;
 };
 

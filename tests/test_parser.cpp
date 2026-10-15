@@ -43,7 +43,7 @@ std::string describe(const Pipeline& pipeline) {
     for (size_t i = 0; i < pipeline.commands.size(); ++i) {
         text += (i == 0 ? "" : " | ") + describe(pipeline.commands[i]);
     }
-    return text;
+    return text + (pipeline.background ? " &" : "");
 }
 
 // Run the real pipeline: tokenize, then parse.
@@ -117,6 +117,35 @@ int main() {
         {R"X(echo a\|b)X", "[echo|a|b]"},
         {R"X(echo "|" | cat)X", "[echo||] | [cat]"},
         {"echo $NX_FILE | cat", "[echo|from-env] | [cat]"},
+
+        // --- background: a trailing & ---
+        {"sleep 1 &", "[sleep|1] &"},
+        {"sleep 1&", "[sleep|1] &"},
+        {"sleep   1   &   ", "[sleep|1] &"},
+        {"ls | wc &", "[ls] | [wc] &"},
+        {"cat < in | sort > out &", "[cat] 0<in | [sort] 1>out &"},
+        {"echo hi > f &", "[echo|hi] 1>f &"},
+        {"> f echo hi &", "[echo|hi] 1>f &"},
+        {"echo hi 2> e &", "[echo|hi] 2>e &"},
+        {"a | b | c &", "[a] | [b] | [c] &"},
+        {"cd /tmp &", "[cd|/tmp] &"},  // a built-in: the executor runs it in a child
+        {R"X(echo "&" a\&b)X", "[echo|&|a&b]"},
+        {R"X(echo "&" &)X", "[echo|&] &"},
+        {R"X(echo hi > "&file")X", "[echo|hi] 1>&file"},  // a quoted & is a plain file name
+        {"echo $NX_FILE &", "[echo|from-env] &"},
+
+        // --- errors: & only at the end, and only after a command ---
+        {"&", "ERROR"},
+        {"& echo hi", "ERROR"},
+        {"echo hi & echo there", "ERROR"},
+        {"echo a&b", "ERROR"},
+        {"a && b", "ERROR"},
+        {"a & &", "ERROR"},
+        {"ls | &", "ERROR"},
+        {"| &", "ERROR"},
+        {"> f &", "ERROR"},
+        {"< in > out &", "ERROR"},
+        {"echo hi > &", "ERROR"},
 
         // --- errors: every stage of a pipeline needs a command ---
         {"| cat", "ERROR"},

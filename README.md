@@ -25,7 +25,7 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 - [x] Phase 4: lexer (quotes, escapes, `$VAR`, `~`)
 - [x] Phase 5: I/O redirection (`>`, `>>`, `<`, `2>`)
 - [x] Phase 6: pipes
-- [ ] Phase 7: background jobs (`&`, `jobs`)
+- [x] Phase 7: background jobs (`&`, `jobs`)
 - [ ] Phase 8: signals (Ctrl+C, Ctrl+Z, SIGCHLD)
 - [ ] Phase 9: history (persistent file, polish)
 - [ ] Phase 10: Linux-style prompt and UI
@@ -35,10 +35,11 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 
 | File | Responsibility |
 |---|---|
-| `main.cpp` | The shell loop: read a line, tokenize, parse, execute |
-| `lexer.h` / `lexer.cpp` | `tokenize()`: quotes, escapes, `$VAR`, `~`, operators (`< > >> 2> \|`), syntax errors. A pure function. |
-| `parser.h` / `parser.cpp` | `parse_pipeline()`: tokens become a `Pipeline` of `Command`s (argv + redirections each) |
-| `executor.h` / `executor.cpp` | `execute()`: runs built-ins in-process, forks one child per stage, wires `pipe()`s, `waitpid()` |
+| `main.cpp` | The shell loop: report finished jobs, read a line, tokenize, parse, execute |
+| `lexer.h` / `lexer.cpp` | `tokenize()`: quotes, escapes, `$VAR`, `~`, operators (`< > >> 2> \| &`), syntax errors. A pure function. |
+| `parser.h` / `parser.cpp` | `parse_pipeline()`: tokens become a `Pipeline` of `Command`s (argv + redirections each) plus a `background` flag |
+| `executor.h` / `executor.cpp` | `execute()`: runs built-ins in-process, forks one child per stage, wires `pipe()`s, `waitpid()`, starts background jobs |
+| `jobs.h` / `jobs.cpp` | `JobTable`: background jobs, `waitpid(WNOHANG)` polling, `Done`/`Exit`/signal notices |
 | `redirect.h` / `redirect.cpp` | `open`/`dup2`/`close` redirection: `apply_redirections()` for children, `RedirectScope` for built-ins |
 | `builtins.h` / `builtins.cpp` | `ShellState`, built-in dispatch table, the 8 built-in commands |
 | `tests/test_lexer.cpp`, `tests/test_parser.cpp` | Table-driven unit tests (`make test`) |
@@ -65,7 +66,13 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
         └─ anything else ──► for each command: pipe() + fork()
                               child:  dup2 pipe ends onto 0/1, close the rest,
                                       apply its redirections, execvp (or run the built-in)
-                              parent: close its pipe ends, then waitpid() every child
+                              parent: close its pipe ends, then
+                                        foreground: waitpid() every child
+                                        background (line ended with &): add to the job table,
+                                                    print "[1] pid", do NOT wait
+
+  before every prompt:  JobTable::notify_done()  ──►  waitpid(WNOHANG) each job,
+                        print "[1]+  Done  cmd" for finished ones, forget them
 ```
 
 The shell forks rather than exec'ing itself, so it survives to run the next command.
@@ -184,6 +191,43 @@ Rules and details:
 - The parent waits for every child, so there are no zombies, and flushes its output before forking,
   so children never print buffered text a second time.
 
+## Background jobs (Phase 7)
+
+Running in the background is just **not waiting**: for `sleep 30 &` the shell does the same
+`fork()` + `execvp()` as usual but skips `waitpid()` and returns to the prompt.
+
+The bookkeeping exists because of **zombies**. When a child exits, the kernel keeps a small record
+(PID and exit status) until the parent collects it with `waitpid()`. An exited child that was never
+collected is a zombie. Foreground children are collected at once; a background child finishes at an
+unpredictable time, so the shell keeps a **job table**:
+
+| Piece | Role |
+|---|---|
+| Job table (`JobTable`) | numbers each job (`[1]`, `[2]`, ...) and records its PIDs and command text |
+| `waitpid(pid, &st, WNOHANG)` | asks "has this child finished?" without blocking: 0 means still running |
+| Reaping | before every prompt the shell polls all jobs, prints `[1]+  Done   cmd` for finished ones, then forgets them |
+| `jobs` built-in | lists the table: `[1]+  Running    sleep 100 &` |
+
+Polling is a stand-in: a job that finishes while the shell waits for input stays a zombie until the
+next prompt. Phase 8 replaces polling with a `SIGCHLD` handler.
+
+Rules and details:
+
+- `&` is accepted only at the **end of the line** (`a & b` is a syntax error; there are no command lists yet).
+- A background **pipeline is one job** (`sleep 1 | cat &`), Done only when every stage has been collected;
+  its status is the last stage's.
+- The first stage reads **`/dev/null`** as stdin unless you redirect it (`cat < f &`), so a background job
+  cannot steal the shell's input (POSIX rule for shells without job control).
+- **Built-ins in the background run in a child** (`cd /tmp &` does not move the shell).
+- `$?` is 0 after launching, and finished jobs never change the status of foreground commands.
+- Notices: `Done`, `Exit N` for a non-zero status, or the signal description (`Killed`, `Terminated`).
+  Numbering restarts at 1 when no jobs are left. `+` marks the most recent job and `-` the one before.
+- The `JobTable` remembers which process owns it, so `jobs | cat` (where `jobs` runs in a forked child)
+  never tries to reap the shell's children.
+- Launch lines and notices are printed even when stdin is not a terminal, which keeps behaviour testable.
+- `2>&1` now lexes as `2>` `&` `1`, so it still gets the clear "descriptor duplication" error;
+  a quoted `"&file"` is an ordinary file name.
+
 ## Why built-ins exist
 
 Every process has its own working directory and environment. A forked child gets a
@@ -244,6 +288,17 @@ nexus> echo $?
 nexus> cd /tmp | cat
 nexus> pwd
 /home/akshat/projects
+nexus> sleep 30 &
+[1] 4242
+nexus> sleep 5 | cat &
+[2] 4244
+nexus> jobs
+[1]-  Running    sleep 30 &
+[2]+  Running    sleep 5 | cat &
+nexus> sh -c 'exit 3' &
+[3] 4250
+nexus>
+[3]+  Exit 3     sh -c 'exit 3'
 nexus> history
     1  echo "hello   world" 'single $HOME' $HOME
     ...
@@ -338,13 +393,32 @@ nexus> exit 3
 - [x] No zombie processes after 200 pipelines
 - [x] Removing the parent's `close(write_end)` makes `echo hi | cat` hang (checked by mutation)
 
+**Phase 7: background jobs** (114 lexer and 83 parser cases in `make test`, plus manual checks)
+- [x] `sleep 3 &` returns at once (shell finished in 0.01s) while a foreground `sleep 1` blocks for 1s
+- [x] `[1] pid` is printed on launch; `jobs` lists `Running` jobs with numbers and `+`/`-` markers
+- [x] A finished job is reported once as `Done`, `Exit N` or the signal name (`Killed`, `Terminated`), then forgotten
+- [x] Job numbers restart at 1 when the table is empty
+- [x] A background pipeline is one job, still `Running` until its slowest stage ends; status comes from the last stage
+- [x] Output and redirections work on background jobs (`seq 1 5 | wc -l > count.txt &`)
+- [x] Background stdin is `/dev/null`: `cat &` does not eat the next command; `cat < file &` reads the file
+- [x] Built-ins in the background (`cd /usr &`, `export V=1 &`, `exit 9 &`) leave the shell unchanged
+- [x] `$?` is 0 after launching; finished jobs do not change a foreground status
+- [x] `&`, `& echo`, `a & b`, `a&b`, `a && b`, `ls | &`, `> f &` are syntax errors (status 2); `2>&1` gives the "descriptor duplication" error
+- [x] Quoted or escaped `&` is ordinary text; `echo hi > "&file"` creates a file named `&file`
+- [x] `jobs | cat` still lists the jobs (a forked copy of the table never reaps the shell's children)
+- [x] 25 simultaneous jobs are all listed and all reported
+- [x] No zombies once the shell has polled: 0 new zombies after several prompts, 30 without the reaping call (checked by mutation)
+- [x] No leaked descriptors in the shell (300 background launches); a background job sees only fds 0, 1, 2
+
 ## Known limitations (to be addressed in later phases)
 
-- `&` (background) is not recognized yet: it is an ordinary character (Phase 7)
-- No `||`, `&&`, `;`, `|&`, subshells `( )` or command substitution `$( )`
-- A pipeline stage with only redirections (`> f | cat`) is rejected
+- A finished job stays a zombie until the next prompt (no `SIGCHLD` handler yet) (Phase 8)
+- Background jobs share the shell's process group, so a terminal Ctrl+C reaches them too (Phase 8)
+- No `fg`, `bg` or `wait`; they come with Ctrl+Z job control (Phase 8)
+- Exiting the shell does not warn about or stop running jobs
+- No `||`, `&&`, `;`, `|&`, command lists (`a & b`), subshells `( )` or command substitution `$( )`
+- A pipeline stage or background line with only redirections (`> f | cat`, `> f &`) is rejected
 - No `2>&1`, `1>`, `2>>`, `&>` or here-documents (`<<`); `2>&1` is rejected with an error
-- A redirection target that starts with `&` is rejected, so a file named `&x` needs `./&x`
 - No word splitting of expanded values: `X="a b"; echo $X` stays one argument (zsh-style)
 - No `~user`, globbing (`*.cpp`), `$1`-style parameters or `#` comments
 - `history` is in-memory only; no persistence yet (Phase 9)

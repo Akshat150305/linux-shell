@@ -16,9 +16,13 @@
 //   126      found but could not be executed
 //   1        a redirection, pipe() or fork() failed
 //
-// A single built-in (no pipe) runs inside the shell process so it can change
-// shell state (cd, export, exit). Every other command, including built-ins
-// that are part of a pipeline, runs in its own forked child.
+// A single built-in (no pipe, not background) runs inside the shell process so
+// it can change shell state (cd, export, exit). Every other command, including
+// built-ins that are part of a pipeline or a background job, runs in its own
+// forked child.
+//
+// A background pipeline (`cmd &`) is started but not waited for: it is added to
+// state.jobs, "[n] pid" is printed, and 0 is returned immediately.
 int execute(ShellState& state, const Pipeline& pipeline);
 
 #endif  // NEXUSSHELL_EXECUTOR_H
