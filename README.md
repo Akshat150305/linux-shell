@@ -24,7 +24,7 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 - [x] Phase 3: built-in commands (`cd`, `pwd`, `echo`, `exit`, `clear`, `help`, `history`, `export`)
 - [x] Phase 4: lexer (quotes, escapes, `$VAR`, `~`)
 - [x] Phase 5: I/O redirection (`>`, `>>`, `<`, `2>`)
-- [ ] Phase 6: pipes
+- [x] Phase 6: pipes
 - [ ] Phase 7: background jobs (`&`, `jobs`)
 - [ ] Phase 8: signals (Ctrl+C, Ctrl+Z, SIGCHLD)
 - [ ] Phase 9: history (persistent file, polish)
@@ -35,9 +35,10 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 
 | File | Responsibility |
 |---|---|
-| `main.cpp` | Shell loop and external command execution (`fork`/`execvp`/`waitpid`) |
-| `lexer.h` / `lexer.cpp` | `tokenize()`: quotes, escapes, `$VAR`, `~`, redirection operators, syntax errors. A pure function. |
-| `parser.h` / `parser.cpp` | `parse_command()`: tokens become a `Command` (argv + redirections) |
+| `main.cpp` | The shell loop: read a line, tokenize, parse, execute |
+| `lexer.h` / `lexer.cpp` | `tokenize()`: quotes, escapes, `$VAR`, `~`, operators (`< > >> 2> \|`), syntax errors. A pure function. |
+| `parser.h` / `parser.cpp` | `parse_pipeline()`: tokens become a `Pipeline` of `Command`s (argv + redirections each) |
+| `executor.h` / `executor.cpp` | `execute()`: runs built-ins in-process, forks one child per stage, wires `pipe()`s, `waitpid()` |
 | `redirect.h` / `redirect.cpp` | `open`/`dup2`/`close` redirection: `apply_redirections()` for children, `RedirectScope` for built-ins |
 | `builtins.h` / `builtins.cpp` | `ShellState`, built-in dispatch table, the 8 built-in commands |
 | `tests/test_lexer.cpp`, `tests/test_parser.cpp` | Table-driven unit tests (`make test`) |
@@ -46,20 +47,25 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 ## How a line is processed
 
 ```
-"sort < in.txt > out.txt"
+"sort < in.txt | head -2 > out.txt"
         │
         ▼
-  tokenize()       ──►  sort  OP(<)  in.txt  OP(>)  out.txt      (lexer.cpp)
+  tokenize()        ──►  sort OP(<) in.txt OP(|) head -2 OP(>) out.txt      (lexer.cpp)
         │
         ▼
-  parse_command()  ──►  argv = {sort}
-        │                redirections = {0 < in.txt, 1 > out.txt}  (parser.cpp)
+  parse_pipeline()  ──►  command 1: argv {sort}      redirections {0 < in.txt}
+        │                 command 2: argv {head, -2}  redirections {1 > out.txt}   (parser.cpp)
         │
-        ├─ built-in?  ──► RedirectScope: save fds, redirect, run
-        │                  in the shell process, restore fds      (builtins.cpp, redirect.cpp)
+        ▼
+  execute()                                                                  (executor.cpp)
         │
-        └─ otherwise  ──► fork() ─► child: open + dup2 + close, then execvp(argv)
-                                    parent: waitpid(child)        (main.cpp)
+        ├─ ONE built-in, no pipe ──► RedirectScope: save fds, redirect, run
+        │                             in the shell process, restore fds
+        │
+        └─ anything else ──► for each command: pipe() + fork()
+                              child:  dup2 pipe ends onto 0/1, close the rest,
+                                      apply its redirections, execvp (or run the built-in)
+                              parent: close its pipe ends, then waitpid() every child
 ```
 
 The shell forks rather than exec'ing itself, so it survives to run the next command.
@@ -138,6 +144,46 @@ Rules and details:
   Skipping the flush or the restore would send output to the wrong place.
 - Files are opened with `O_CLOEXEC`, so a spare descriptor can never leak into a program.
 
+## Pipes (Phase 6)
+
+`pipe(fd)` creates a kernel buffer (about 64 KB on Linux) with two ends: `fd[0]` is the
+**read end** and `fd[1]` is the **write end**. For `a | b | c` the shell makes a pipe per `|`,
+forks one child per command, and uses `dup2` to wire stdout of each stage to the write end and
+stdin of the next stage to the read end:
+
+```
+a ──fd 1──► [pipe 1] ──fd 0──► b ──fd 1──► [pipe 2] ──fd 0──► c
+```
+
+All stages run **at the same time**. The pipe is the flow control: a writer blocks when the buffer
+is full and a reader blocks when it is empty.
+
+**The classic bug: unclosed pipe ends.** A reader sees end-of-file only when *every* copy of the
+write end is closed. If the parent (or any other child) keeps a copy, the reader waits forever.
+So every process closes every pipe descriptor it does not use:
+
+| Process | Closes |
+|---|---|
+| Child | the original pipe fds, right after `dup2` copied the needed ones onto 0 and 1 |
+| Parent | its copies of both ends, right after each `fork()` |
+
+Pipes are created one at a time, so the parent holds at most two pipe ends, and `pipe2(O_CLOEXEC)`
+closes any stragglers on `exec` as a safety net.
+
+Rules and details:
+
+- **Status:** a pipeline's exit status is the **last** command's (bash default): `false | true` is 0.
+- **Early-exiting reader:** `yes | head -1` finishes because the next `write()` by `yes` gets **SIGPIPE**.
+- **Stderr is not piped:** `ls /nonexistent | wc` prints the error on the terminal.
+- **Built-ins in a pipeline run in a child**, as in bash. `echo hi | cat` forks for `echo`, and
+  `cd /tmp | cat` does **not** change the shell's directory. A single built-in with no pipe still
+  runs in the shell process.
+- **Redirections win over pipes:** `echo hi > f | cat` writes to `f` and leaves `cat` an empty input;
+  `echo x | cat < f` reads from `f`.
+- Every stage must be a command: `| cat`, `echo |`, `a || b` and `> f | cat` are syntax errors (status 2).
+- The parent waits for every child, so there are no zombies, and flushes its output before forking,
+  so children never print buffered text a second time.
+
 ## Why built-ins exist
 
 Every process has its own working directory and environment. A forked child gets a
@@ -181,6 +227,23 @@ line one
 line two
 nexus> echo ">" is just text
 > is just text
+nexus> ls /bin | head -3
+2to3-3.11
+X11
+Xvfb
+nexus> printf "b\na\nc\na\n" | sort | uniq -c | sort -rn
+      2 a
+      1 c
+      1 b
+nexus> seq 1 100 | grep 5 | wc -l
+19
+nexus> cat < notes.txt | sort | head -1 > first.txt
+nexus> false | true
+nexus> echo $?
+0
+nexus> cd /tmp | cat
+nexus> pwd
+/home/akshat/projects
 nexus> history
     1  echo "hello   world" 'single $HOME' $HOME
     ...
@@ -237,7 +300,7 @@ nexus> exit 3
 - [x] Very long lines with thousands of arguments work (no fixed-size buffers)
 - [x] The unit tests fail when the lexer is deliberately broken (checked by mutation)
 
-**Phase 5: redirection** (87 lexer and 36 parser cases in `make test`, plus manual checks)
+**Phase 5: redirection** (automated cases in `make test`, plus manual checks)
 - [x] `>` creates a file with mode 0644 (under umask 022) and truncates an existing one
 - [x] `>>` appends; `<` feeds a file to stdin; `<` and `>` work together (`sort < in > out`)
 - [x] `2>` captures stderr only; `> o 2> e` splits stdout and stderr, in either order
@@ -255,13 +318,34 @@ nexus> exit 3
 - [x] No leaked file descriptors in the shell (500 redirected commands) or in child programs (`ls /proc/self/fd` shows only 0, 1, 2)
 - [x] No zombie processes after many redirected commands
 
+**Phase 6: pipes** (100 lexer and 58 parser cases in `make test`, plus manual checks)
+- [x] Two, three, four, five and 30-stage pipelines produce the right output
+- [x] Built-in into external (`echo hi | cat`), external into external, and external into built-in all work
+- [x] Large data (`seq 1 200000 | wc -l`) flows through, proving the stages run concurrently
+- [x] The reader sees EOF when the writer finishes: no hang (the parent closes its write end)
+- [x] `yes | head -3` and `yes | head -100000 | wc -l` terminate (SIGPIPE stops the writer)
+- [x] Pipeline status is the last command's (`false | true` is 0, `true | false` is 1, `x | nosuchcmd` is 127)
+- [x] Built-ins inside a pipeline run in a child: `cd /usr | cat` and `export V=1 | cat` leave the shell unchanged; `exit 5 | cat` does not exit the shell
+- [x] The same built-ins without a pipe still change the shell
+- [x] Redirections combine with pipes (`cat < in | sort > out`); an explicit redirect wins over the pipe
+- [x] Stderr is not piped; `2>` on one stage captures only that stage's errors
+- [x] A failing stage (`nosuchcmd | cat`) does not block the others
+- [x] `| cat`, `echo |`, `a || b`, `ls | | wc` and `> f | cat` are syntax errors with status 2
+- [x] Quoted or escaped `|` is ordinary text; `echo hi|cat` works without spaces
+- [x] Children hold only fds 0, 1, 2 (no stray pipe ends); the shell holds the same 3 fds after 600 pipelines
+- [x] The shell's own stdin and stdout are unchanged afterwards
+- [x] No duplicated output when the shell's stdout is a file (buffers flushed before fork)
+- [x] No zombie processes after 200 pipelines
+- [x] Removing the parent's `close(write_end)` makes `echo hi | cat` hang (checked by mutation)
+
 ## Known limitations (to be addressed in later phases)
 
+- `&` (background) is not recognized yet: it is an ordinary character (Phase 7)
+- No `||`, `&&`, `;`, `|&`, subshells `( )` or command substitution `$( )`
+- A pipeline stage with only redirections (`> f | cat`) is rejected
 - No `2>&1`, `1>`, `2>>`, `&>` or here-documents (`<<`); `2>&1` is rejected with an error
 - A redirection target that starts with `&` is rejected, so a file named `&x` needs `./&x`
-
 - No word splitting of expanded values: `X="a b"; echo $X` stays one argument (zsh-style)
-- No `~user`, globbing (`*.cpp`), `$1`-style parameters, command substitution or `#` comments
+- No `~user`, globbing (`*.cpp`), `$1`-style parameters or `#` comments
 - `history` is in-memory only; no persistence yet (Phase 9)
-- Pipes and `&` are not recognized yet: `|` and `&` are ordinary characters (Phases 6-7)
-- Ctrl+C also kills the shell (Phase 8)
+- Ctrl+C also kills the shell, and a foreground pipeline is not in its own process group yet (Phase 8)

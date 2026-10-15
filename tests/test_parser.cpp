@@ -34,15 +34,27 @@ std::string describe(const Command& command) {
     return text;
 }
 
+// A pipeline prints its commands joined by " | ". A blank line prints "[]".
+std::string describe(const Pipeline& pipeline) {
+    if (pipeline.commands.empty()) {
+        return "[]";
+    }
+    std::string text;
+    for (size_t i = 0; i < pipeline.commands.size(); ++i) {
+        text += (i == 0 ? "" : " | ") + describe(pipeline.commands[i]);
+    }
+    return text;
+}
+
 // Run the real pipeline: tokenize, then parse.
 std::string run(const std::string& line) {
     std::vector<Token> tokens;
-    Command command;
+    Pipeline pipeline;
     std::string error;
-    if (!tokenize(line, 0, tokens, error) || !parse_command(tokens, command, error)) {
+    if (!tokenize(line, 0, tokens, error) || !parse_pipeline(tokens, pipeline, error)) {
         return "ERROR";
     }
-    return describe(command);
+    return describe(pipeline);
 }
 
 }  // namespace
@@ -91,6 +103,32 @@ int main() {
         {R"X(echo hi > ">")X", "[echo|hi] 1>>"},  // a file literally named ">"
         {R"X(echo hi > "my file")X", "[echo|hi] 1>my file"},
         {"echo hi > $NX_FILE", "[echo|hi] 1>from-env"},
+
+        // --- pipelines ---
+        {"ls | wc", "[ls] | [wc]"},
+        {"ls|wc", "[ls] | [wc]"},
+        {"ls -l | grep cpp | wc -l", "[ls|-l] | [grep|cpp] | [wc|-l]"},
+        {"a | b | c | d | e", "[a] | [b] | [c] | [d] | [e]"},
+        {"cat < in | sort > out", "[cat] 0<in | [sort] 1>out"},
+        {"echo hi > f | cat", "[echo|hi] 1>f | [cat]"},
+        {"ls 2> e | wc < in", "[ls] 2>e | [wc] 0<in"},
+        {"> out echo hi | cat", "[echo|hi] 1>out | [cat]"},
+        {R"X(echo "a|b" | cat)X", "[echo|a|b] | [cat]"},
+        {R"X(echo a\|b)X", "[echo|a|b]"},
+        {R"X(echo "|" | cat)X", "[echo||] | [cat]"},
+        {"echo $NX_FILE | cat", "[echo|from-env] | [cat]"},
+
+        // --- errors: every stage of a pipeline needs a command ---
+        {"| cat", "ERROR"},
+        {"echo |", "ERROR"},
+        {"echo || cat", "ERROR"},
+        {"ls | | wc", "ERROR"},
+        {"|", "ERROR"},
+        {"| |", "ERROR"},
+        {"> f | cat", "ERROR"},
+        {"echo | > f", "ERROR"},
+        {"echo > | cat", "ERROR"},
+        {"echo | cat <", "ERROR"},
 
         // --- errors: operator without a file name ---
         {"echo hi >", "ERROR"},

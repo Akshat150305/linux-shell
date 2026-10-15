@@ -146,6 +146,21 @@ int main() {
         {"echo 2>>f", {"echo", "OP(2>)", "OP(>)", "f"}, false},
         {"echo \"2\">f", {"echo", "2", "OP(>)", "f"}, false},
 
+        // --- pipe operator ---
+        {"ls | wc", {"ls", "OP(|)", "wc"}, false},
+        {"ls|wc", {"ls", "OP(|)", "wc"}, false},
+        {"ls |wc", {"ls", "OP(|)", "wc"}, false},
+        {"a | b | c", {"a", "OP(|)", "b", "OP(|)", "c"}, false},
+        {"a || b", {"a", "OP(|)", "OP(|)", "b"}, false},
+        {"echo hi>f|cat", {"echo", "hi", "OP(>)", "f", "OP(|)", "cat"}, false},
+        {"ls 2>e|wc", {"ls", "OP(2>)", "e", "OP(|)", "wc"}, false},
+        {"cat<in|sort>out", {"cat", "OP(<)", "in", "OP(|)", "sort", "OP(>)", "out"}, false},
+        {"echo |", {"echo", "OP(|)"}, false},
+        {"| echo", {"OP(|)", "echo"}, false},
+        {R"X(echo "|" '|' \|)X", {"echo", "|", "|", "|"}, false},
+        {R"X(echo a"|"b a\|b)X", {"echo", "a|b", "a|b"}, false},
+        {R"X(echo "a | b" | cat)X", {"echo", "a | b", "OP(|)", "cat"}, false},
+
         // --- quoted or escaped operators are ordinary text ---
         {R"X(echo ">" '<' ">>" "2>")X", {"echo", ">", "<", ">>", "2>"}, false},
         {R"X(echo \> \< \>\>)X", {"echo", ">", "<", ">>"}, false},

@@ -42,11 +42,61 @@ bool parse_command(const std::vector<Token>& tokens, Command& command,
         } else if (token.text == ">>") {
             redirection.fd = 1;
             redirection.kind = Redirection::Kind::Append;
-        } else {  // "2>"
+        } else if (token.text == "2>") {
             redirection.fd = 2;
             redirection.kind = Redirection::Kind::Write;
+        } else {
+            error = "unexpected operator '" + token.text + "'";
+            return false;
         }
         command.redirections.push_back(redirection);
+    }
+    return true;
+}
+
+bool parse_pipeline(const std::vector<Token>& tokens, Pipeline& pipeline,
+                    std::string& error) {
+    pipeline = Pipeline{};
+    error.clear();
+    if (tokens.empty()) {
+        return true;  // nothing to run
+    }
+
+    // Collect tokens until a '|', parse them as one command, start over.
+    std::vector<Token> segment;
+    auto finish_segment = [&]() {
+        Command command;
+        if (!parse_command(segment, command, error)) {
+            return false;
+        }
+        pipeline.commands.push_back(command);
+        segment.clear();
+        return true;
+    };
+
+    bool has_pipe = false;
+    for (const Token& token : tokens) {
+        if (token.is_operator && token.text == "|") {
+            has_pipe = true;
+            if (!finish_segment()) {
+                return false;
+            }
+        } else {
+            segment.push_back(token);
+        }
+    }
+    if (!finish_segment()) {
+        return false;
+    }
+
+    // Every stage of a real pipeline must be a command.
+    if (has_pipe) {
+        for (const Command& command : pipeline.commands) {
+            if (command.argv.empty()) {
+                error = "missing command next to '|'";
+                return false;
+            }
+        }
     }
     return true;
 }

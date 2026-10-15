@@ -110,11 +110,11 @@ bool tokenize(const std::string& line, int last_status, std::vector<Token>& toke
             continue;
         }
 
-        // Redirection operators, only when unquoted: <  >  >>  and 2>
-        // "2>" counts only at the start of a word, so `a2>f` is the word
-        // "a2" followed by ">", and `echo 2 > f` passes "2" as an argument.
+        // Operators, only when unquoted: redirections <  >  >>  2>  and the
+        // pipe |. "2>" counts only at the start of a word, so `a2>f` is the
+        // word "a2" followed by ">", and `echo 2 > f` passes "2" as an argument.
         char ahead = (i + 1 < line.size()) ? line[i + 1] : '\0';
-        if (c == '<' || c == '>' || (c == '2' && !in_word && ahead == '>')) {
+        if (c == '<' || c == '>' || c == '|' || (c == '2' && !in_word && ahead == '>')) {
             finish_word();  // an operator also ends the word before it: echo hi>f
             std::string op;
             if (c == '2') {
