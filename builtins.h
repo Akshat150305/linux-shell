@@ -16,7 +16,9 @@ struct ShellState {
     bool running = true;                  // main loop runs while this is true
     int last_status = 0;                  // exit status of the last command
     std::vector<std::string> history;     // every non-blank line entered
-    JobTable jobs;                        // background jobs (Phase 7)
+    JobTable jobs;                        // foreground and background jobs
+    bool exit_warned = false;             // the last command warned about stopped jobs
+    bool exit_confirmed = false;          // ...so this `exit` may proceed
 };
 
 // True if `name` is one of the built-in commands.

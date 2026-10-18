@@ -130,6 +130,12 @@ int builtin_exit(ShellState& state, const Args& args) {
         std::cerr << "nexus: exit: too many arguments" << std::endl;
         return 1;
     }
+    // Leaving would abandon stopped jobs: warn once; a second `exit` leaves.
+    if (state.jobs.has_stopped() && !state.exit_confirmed) {
+        std::cerr << "There are stopped jobs." << std::endl;
+        state.exit_warned = true;
+        return 1;
+    }
     if (args.size() == 1) {
         state.running = false;
         return state.last_status;
@@ -162,7 +168,12 @@ int builtin_help(ShellState&, const Args&) {
         "  echo [-n] [text]  print text (-n: no trailing newline)\n"
         "  export [NAME=val] set an environment variable (no args: list all)\n"
         "  history           show commands entered in this session\n"
-        "  jobs              list background jobs (start one with: command &)\n"
+        "  jobs              list jobs (start one in the background with: command &)\n"
+        "  fg [%n]           bring a job to the foreground (continues it if stopped)\n"
+        "  bg [%n]           continue a stopped job in the background\n"
+        "\n"
+        "Ctrl+C interrupts the running command, Ctrl+Z stops it (resume: fg / bg).\n"
+        "\n"
         "  clear             clear the screen\n"
         "  help              show this message\n"
         "  exit [n]          leave the shell with status n\n"
@@ -225,9 +236,59 @@ int builtin_export(ShellState&, const Args& args) {
     return status;
 }
 
-// jobs: list background jobs started with `command &`.
+// jobs: list running and stopped jobs.
 int builtin_jobs(ShellState& state, const Args&) {
     state.jobs.list();
+    return 0;
+}
+
+// Look up the job a fg/bg argument refers to. Prints an error and returns 0
+// if job control is off or there is no such job.
+int pick_job(ShellState& state, const char* name, const Args& args) {
+    if (!state.jobs.can_control()) {
+        std::cerr << "nexus: " << name << ": no job control" << std::endl;
+        return 0;
+    }
+    if (args.size() > 2) {
+        std::cerr << "nexus: " << name << ": too many arguments" << std::endl;
+        return 0;
+    }
+    state.jobs.refresh();
+    std::string spec = args.size() == 2 ? args[1] : "";
+    int id = state.jobs.resolve(spec);
+    if (id == 0) {
+        std::cerr << "nexus: " << name << ": " << (spec.empty() ? "current" : spec)
+                  << ": no such job" << std::endl;
+    }
+    return id;
+}
+
+// fg [%n]: give the job the terminal and wait for it.
+int builtin_fg(ShellState& state, const Args& args) {
+    int id = pick_job(state, "fg", args);
+    if (id == 0) {
+        return 1;
+    }
+    std::cout << state.jobs.find(id)->command << std::endl;
+    return state.jobs.run_in_foreground(id, true);
+}
+
+// bg [%n]: let a stopped job continue in the background.
+int builtin_bg(ShellState& state, const Args& args) {
+    int id = pick_job(state, "bg", args);
+    if (id == 0) {
+        return 1;
+    }
+    const Job* job = state.jobs.find(id);
+    if (job->done()) {
+        std::cerr << "nexus: bg: job has terminated" << std::endl;
+        return 1;
+    }
+    if (!job->stopped()) {
+        std::cerr << "nexus: bg: job " << id << " already in background" << std::endl;
+        return 0;
+    }
+    state.jobs.run_in_background(id);
     return 0;
 }
 
@@ -238,7 +299,8 @@ const std::unordered_map<std::string, BuiltinFn>& builtin_table() {
         {"echo", builtin_echo},     {"exit", builtin_exit},
         {"clear", builtin_clear},   {"help", builtin_help},
         {"history", builtin_history}, {"export", builtin_export},
-        {"jobs", builtin_jobs},
+        {"jobs", builtin_jobs},   {"fg", builtin_fg},
+        {"bg", builtin_bg},
     };
     return table;
 }

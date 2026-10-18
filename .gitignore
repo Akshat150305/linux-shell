@@ -2,3 +2,5 @@
 nexusshell
 tests/test_lexer
 tests/test_parser
+tests/test_jobs
+__pycache__/

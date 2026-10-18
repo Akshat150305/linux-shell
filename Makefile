@@ -1,10 +1,10 @@
 CXX      := g++
 CXXFLAGS := -Wall -Wextra -std=c++17 -g
 TARGET   := nexusshell
-SRCS     := main.cpp builtins.cpp lexer.cpp parser.cpp redirect.cpp executor.cpp jobs.cpp
+SRCS     := main.cpp builtins.cpp lexer.cpp parser.cpp redirect.cpp executor.cpp jobs.cpp signals.cpp
 OBJS     := $(SRCS:.cpp=.o)
-HEADERS  := builtins.h lexer.h parser.h redirect.h executor.h jobs.h
-TEST_BINS := tests/test_lexer tests/test_parser
+HEADERS  := builtins.h lexer.h parser.h redirect.h executor.h jobs.h signals.h
+TEST_BINS := tests/test_lexer tests/test_parser tests/test_jobs
 
 all: $(TARGET)
 
@@ -15,10 +15,12 @@ $(TARGET): $(OBJS)
 %.o: %.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# Unit tests for the lexer and parser (pure functions, no shell needed).
+# Unit tests (no shell needed). `make test-pty` drives the real shell on a
+# pseudo-terminal to test Ctrl+C / Ctrl+Z / fg / bg.
 test: $(TEST_BINS)
 	./tests/test_lexer
 	./tests/test_parser
+	./tests/test_jobs
 
 tests/test_lexer: tests/test_lexer.cpp lexer.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) -I. tests/test_lexer.cpp lexer.cpp -o $@
@@ -26,7 +28,13 @@ tests/test_lexer: tests/test_lexer.cpp lexer.cpp $(HEADERS)
 tests/test_parser: tests/test_parser.cpp lexer.cpp parser.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) -I. tests/test_parser.cpp lexer.cpp parser.cpp -o $@
 
+tests/test_jobs: tests/test_jobs.cpp jobs.cpp signals.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) -I. tests/test_jobs.cpp jobs.cpp signals.cpp -o $@
+
+test-pty: $(TARGET)
+	python3 tests/test_job_control.py
+
 clean:
 	rm -f $(OBJS) $(TARGET) $(TEST_BINS)
 
-.PHONY: all test clean
+.PHONY: all test test-pty clean

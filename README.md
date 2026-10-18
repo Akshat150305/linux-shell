@@ -26,7 +26,7 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 - [x] Phase 5: I/O redirection (`>`, `>>`, `<`, `2>`)
 - [x] Phase 6: pipes
 - [x] Phase 7: background jobs (`&`, `jobs`)
-- [ ] Phase 8: signals (Ctrl+C, Ctrl+Z, SIGCHLD)
+- [x] Phase 8: signals and job control (Ctrl+C, Ctrl+Z, SIGCHLD, `fg`, `bg`)
 - [ ] Phase 9: history (persistent file, polish)
 - [ ] Phase 10: Linux-style prompt and UI
 - [ ] Phase 11: testing, docs and polish
@@ -35,14 +35,16 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 
 | File | Responsibility |
 |---|---|
-| `main.cpp` | The shell loop: report finished jobs, read a line, tokenize, parse, execute |
+| `main.cpp` | The shell loop: report finished/stopped jobs, read a line (Ctrl+C aware), tokenize, parse, execute |
 | `lexer.h` / `lexer.cpp` | `tokenize()`: quotes, escapes, `$VAR`, `~`, operators (`< > >> 2> \| &`), syntax errors. A pure function. |
 | `parser.h` / `parser.cpp` | `parse_pipeline()`: tokens become a `Pipeline` of `Command`s (argv + redirections each) plus a `background` flag |
-| `executor.h` / `executor.cpp` | `execute()`: runs built-ins in-process, forks one child per stage, wires `pipe()`s, `waitpid()`, starts background jobs |
-| `jobs.h` / `jobs.cpp` | `JobTable`: background jobs, `waitpid(WNOHANG)` polling, `Done`/`Exit`/signal notices |
+| `executor.h` / `executor.cpp` | `execute()`: runs built-ins in-process, forks one child per stage into its own process group, wires `pipe()`s, hands over the terminal, waits through the job table |
+| `jobs.h` / `jobs.cpp` | `JobTable`: foreground, background and stopped jobs as process groups; `fg`/`bg` logic; `Done`/`Stopped` notices |
+| `signals.h` / `signals.cpp` | `SIGCHLD` handler (the single reaper), `SIGINT`/`SIGTSTP` policy, process groups and terminal ownership (`tcsetpgrp`), terminal modes |
 | `redirect.h` / `redirect.cpp` | `open`/`dup2`/`close` redirection: `apply_redirections()` for children, `RedirectScope` for built-ins |
-| `builtins.h` / `builtins.cpp` | `ShellState`, built-in dispatch table, the 8 built-in commands |
-| `tests/test_lexer.cpp`, `tests/test_parser.cpp` | Table-driven unit tests (`make test`) |
+| `builtins.h` / `builtins.cpp` | `ShellState`, built-in dispatch table, the built-in commands (incl. `jobs`, `fg`, `bg`) |
+| `tests/test_lexer.cpp`, `tests/test_parser.cpp`, `tests/test_jobs.cpp` | Table-driven unit tests (`make test`) |
+| `tests/test_job_control.py` | End-to-end tests on a pseudo-terminal: real Ctrl+C / Ctrl+Z (`make test-pty`, needs `python3`) |
 | `Makefile` | Build rules |
 
 ## How a line is processed
@@ -208,8 +210,7 @@ unpredictable time, so the shell keeps a **job table**:
 | Reaping | before every prompt the shell polls all jobs, prints `[1]+  Done   cmd` for finished ones, then forgets them |
 | `jobs` built-in | lists the table: `[1]+  Running    sleep 100 &` |
 
-Polling is a stand-in: a job that finishes while the shell waits for input stays a zombie until the
-next prompt. Phase 8 replaces polling with a `SIGCHLD` handler.
+(Phase 7 polled with `waitpid(WNOHANG)` before each prompt; Phase 8 replaced that with a `SIGCHLD` handler, see below.)
 
 Rules and details:
 
@@ -227,6 +228,42 @@ Rules and details:
 - Launch lines and notices are printed even when stdin is not a terminal, which keeps behaviour testable.
 - `2>&1` now lexes as `2>` `&` `1`, so it still gets the clear "descriptor duplication" error;
   a quoted `"&file"` is an ordinary file name.
+
+## Signals and job control (Phase 8)
+
+**Who receives Ctrl+C?** The terminal driver turns Ctrl+C into `SIGINT` and Ctrl+Z into `SIGTSTP` and sends
+it to the **foreground process group** of the terminal, and to nobody else. So the shell gives every job its
+own process group and decides which group is in the foreground.
+
+| Mechanism | Role |
+|---|---|
+| `setpgid(pid, pgid)` | each pipeline becomes one process group; signals sent to `-pgid` reach every stage |
+| `tcsetpgrp(tty, pgid)` | makes a group the terminal's foreground group; the shell takes it back after the job ends or stops |
+| `SIGINT` handler (no `SA_RESTART`) | Ctrl+C at the prompt interrupts `getline()` and gives a fresh prompt; the shell never dies from it |
+| `SIGTSTP`, `SIGQUIT`, `SIGTTIN`, `SIGTTOU` ignored | Ctrl+Z at the prompt does nothing; `tcsetpgrp()` works from a background group |
+| `SIGCHLD` handler | the **single reaper**: loops `waitpid(-1, WNOHANG \| WUNTRACED \| WCONTINUED)` and stores `(pid, status)` in a fixed array |
+| `WUNTRACED` / `WCONTINUED` | also report children that were **stopped** (Ctrl+Z) or **continued** (`SIGCONT`) |
+| `sigsuspend()` | waits for a foreground job without a lost-wakeup race (block `SIGCHLD`, check, then unblock-and-sleep atomically) |
+| `SIGCONT` | resumes a stopped group (`fg`, `bg`) |
+
+Races that are handled on purpose:
+
+- **Event before registration:** `SIGCHLD` stays blocked from the first `fork()` until the job is in the table (`SigchldBlock`).
+- **Terminal handoff:** both parent and child call `setpgid`, and the child also takes the terminal before `exec`, so it can never read the terminal as a background process (which would stop it with `SIGTTIN`).
+- **Inherited signal state:** `SIG_IGN` survives `exec` and a forked built-in never execs, so every child calls `reset_child_signals()` (default handlers, empty mask).
+- **Async-signal-safety:** the handler only calls `waitpid()`, writes to a fixed array and restores `errno`. All real work happens later in `JobTable::refresh()`.
+- **Terminal settings:** a stopped job's `termios` is saved and restored on `fg`. A normal command that changes the terminal (`stty -echo`) is kept; a job killed by a signal gets the shell's settings back.
+- **Redirected stdin:** the shell keeps a private duplicate of the terminal (fd >= 10, close-on-exec), so `fg < /dev/null` still works.
+
+Behaviour:
+
+- Ctrl+C kills the foreground job (whole pipeline); status `130`. Background jobs are not touched.
+- Ctrl+Z stops it and prints `[1]+  Stopped     sleep 30`; status `148`. `jobs` lists it, `bg` continues it in the background, `fg` brings it back (prints the command first).
+- Job specs: `%1`, `1`, `%%`/`%+` (current), `%-` (previous), or none (current job).
+- `exit` or Ctrl+D with stopped jobs prints `There are stopped jobs.` once; the next `exit` leaves and sends them `SIGHUP` + `SIGCONT`.
+- A foreground job killed by a signal prints its description (`Killed`, `Terminated`), as bash does.
+- Job control is on only when stdin is a terminal. Scripts and pipes (`printf ... | ./nexusshell`) behave like Phase 7: no process groups, `fg`/`bg` say `no job control`, but the `SIGCHLD` reaper is always on, so there are no zombies.
+- Finished background jobs are reaped the instant they end (no more zombies until the next prompt); the `Done` notice still appears before the next prompt.
 
 ## Why built-ins exist
 
@@ -410,16 +447,31 @@ nexus> exit 3
 - [x] No zombies once the shell has polled: 0 new zombies after several prompts, 30 without the reaping call (checked by mutation)
 - [x] No leaked descriptors in the shell (300 background launches); a background job sees only fds 0, 1, 2
 
+**Phase 8: signals and job control** (`make test`: 114 lexer, 83 parser, 35 job-table cases; `make test-pty`: 20 pseudo-terminal cases)
+- [x] Ctrl+C kills `sleep 30` but not the shell; `$?` is 130
+- [x] Ctrl+C at an empty prompt (or after a partial line) gives a fresh prompt; the partial line is discarded
+- [x] Ctrl+C kills every stage of `sleep 30 | sleep 30 | sleep 30`; no stage is left behind
+- [x] Ctrl+C does not touch a background job
+- [x] Ctrl+Z stops the job and prints `[1]+  Stopped`; `$?` is 148; `jobs` shows `Stopped`; Ctrl+Z at the prompt is ignored
+- [x] Ctrl+Z stops the whole pipeline (every stage in state `T`); `fg` resumes all of it
+- [x] `bg` continues a stopped job (`[1]+ sleep 30 &`, then `Running`); `fg` brings it back and Ctrl+C kills it
+- [x] `fg` finishes a resumed job normally and returns its real exit status
+- [x] `fg`/`bg` errors: `no such job`, `already in background`, `no job control` in scripts
+- [x] A finished background job is reaped immediately: 0 zombies with no prompt in between; 25 `true &` leave 0 zombies
+- [x] A foreground job killed by a signal prints `Killed` and gives status 137
+- [x] `exit` / Ctrl+D with stopped jobs warns once; the second one leaves and the stopped job is gone
+- [x] `stty -echo` as a command survives a later Ctrl+Z / `fg` cycle
+- [x] `jobs < /dev/null` and `fg < /dev/null` work (the shell keeps a private copy of the terminal)
+- [x] Children start with default signal handling (no inherited ignores for INT, QUIT, TSTP, TTIN, TTOU)
+- [x] Phase 1-7 behaviour unchanged (redirections, pipes, background, `$?`, no leaked descriptors)
+- [x] Removing the `setpgid` calls makes 9 of the 20 pty tests fail (checked by mutation)
+
 ## Known limitations (to be addressed in later phases)
 
-- A finished job stays a zombie until the next prompt (no `SIGCHLD` handler yet) (Phase 8)
-- Background jobs share the shell's process group, so a terminal Ctrl+C reaches them too (Phase 8)
-- No `fg`, `bg` or `wait`; they come with Ctrl+Z job control (Phase 8)
-- Exiting the shell does not warn about or stop running jobs
+- No `wait` or `kill %1` (the external `kill` takes PIDs); no `%name` job specs; the shell does not `disown` or `SIGHUP` running background jobs on exit
 - No `||`, `&&`, `;`, `|&`, command lists (`a & b`), subshells `( )` or command substitution `$( )`
 - A pipeline stage or background line with only redirections (`> f | cat`, `> f &`) is rejected
 - No `2>&1`, `1>`, `2>>`, `&>` or here-documents (`<<`); `2>&1` is rejected with an error
 - No word splitting of expanded values: `X="a b"; echo $X` stays one argument (zsh-style)
 - No `~user`, globbing (`*.cpp`), `$1`-style parameters or `#` comments
 - `history` is in-memory only; no persistence yet (Phase 9)
-- Ctrl+C also kills the shell, and a foreground pipeline is not in its own process group yet (Phase 8)

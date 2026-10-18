@@ -1,5 +1,7 @@
 // NexusShell - executor.cpp
 // Phase 6: pipelines. One forked child per stage, joined by pipe()s.
+// Phase 8: every pipeline is a job with its own process group; the terminal is
+// handed to a foreground job, and waiting goes through the job table.
 //
 //   cmd1 | cmd2 | cmd3
 //
@@ -19,23 +21,12 @@
 #include <vector>
 
 #include <fcntl.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include "redirect.h"
+#include "signals.h"
 
 namespace {
-
-// Turn a wait() status into a shell-style exit status.
-int decode_status(int status) {
-    if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);
-    }
-    if (WIFSIGNALED(status)) {
-        return 128 + WTERMSIG(status);
-    }
-    return 1;
-}
 
 // Make `to` refer to the same file as `from`, then drop `from`.
 void move_fd(int from, int to) {
@@ -136,17 +127,19 @@ int run_in_shell(ShellState& state, const Command& command) {
     return run_builtin(state, command.argv);
 }
 
-// Wait for one child, retrying if a signal interrupts the wait.
-int wait_for(pid_t pid) {
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0) {
-        if (errno == EINTR) {
-            continue;
-        }
-        std::cerr << "nexus: waitpid failed: " << std::strerror(errno) << std::endl;
-        return 1;
+// Child side of job control: join the job's process group and, for a
+// foreground job, take the terminal. The parent does the same after fork():
+// whichever runs first wins, so there is no window where the child could read
+// the terminal as a background process (and be stopped by SIGTTIN).
+//   pgid == 0 means "I am the first stage: start a new group led by me".
+void join_process_group(pid_t pgid, bool foreground) {
+    if (!job_control_active()) {
+        return;
     }
-    return decode_status(status);
+    setpgid(0, pgid);
+    if (foreground) {
+        give_terminal_to(getpgrp());
+    }
 }
 
 }  // namespace
@@ -169,72 +162,93 @@ int execute(ShellState& state, const Pipeline& pipeline) {
     flush_output();
 
     std::vector<pid_t> pids;
-    int prev_read = -1;  // read end of the previous stage's pipe
+    pid_t pgid = 0;       // process group of the job = pid of its first stage
+    int prev_read = -1;   // read end of the previous stage's pipe
     bool failed = false;
+    bool foreground = !pipeline.background;
+    int id = 0;
 
-    for (size_t i = 0; i < commands.size(); ++i) {
-        bool last = (i + 1 == commands.size());
+    {
+        // SIGCHLD stays blocked from the first fork() until the job is in the
+        // table. Otherwise a fast child could exit and its report be looked up
+        // before the table knew about it.
+        SigchldBlock block;
 
-        // Pipes are made one at a time, so the parent never holds more than
-        // two pipe ends. O_CLOEXEC closes them automatically on exec, as a
-        // safety net on top of the explicit close() calls.
-        int fds[2] = {-1, -1};  // fds[0] = read end, fds[1] = write end
-        if (!last && pipe2(fds, O_CLOEXEC) < 0) {
-            std::cerr << "nexus: pipe failed: " << std::strerror(errno) << std::endl;
-            failed = true;
-            break;
-        }
+        for (size_t i = 0; i < commands.size(); ++i) {
+            bool last = (i + 1 == commands.size());
 
-        pid_t pid = fork();
-        if (pid < 0) {
-            std::cerr << "nexus: fork failed: " << std::strerror(errno) << std::endl;
-            if (!last) {
-                close(fds[0]);
-                close(fds[1]);
+            // Pipes are made one at a time, so the parent never holds more
+            // than two pipe ends. O_CLOEXEC closes them automatically on exec,
+            // as a safety net on top of the explicit close() calls.
+            int fds[2] = {-1, -1};  // fds[0] = read end, fds[1] = write end
+            if (!last && pipe2(fds, O_CLOEXEC) < 0) {
+                std::cerr << "nexus: pipe failed: " << std::strerror(errno) << std::endl;
+                failed = true;
+                break;
             }
-            failed = true;
-            break;
+
+            pid_t pid = fork();
+            if (pid < 0) {
+                std::cerr << "nexus: fork failed: " << std::strerror(errno) << std::endl;
+                if (!last) {
+                    close(fds[0]);
+                    close(fds[1]);
+                }
+                failed = true;
+                break;
+            }
+
+            if (pid == 0) {
+                // ---- CHILD ----
+                join_process_group(pgid, foreground);
+                reset_child_signals();  // default signals, empty mask
+                run_stage(state, commands[i], prev_read, last ? -1 : fds[1],
+                          last ? -1 : fds[0], pipeline.background && i == 0);
+            }
+
+            // ---- PARENT ----
+            if (pgid == 0) {
+                pgid = pid;
+            }
+            if (job_control_active()) {
+                setpgid(pid, pgid);  // the child does it too; doing both avoids a race
+                if (foreground && pids.empty()) {
+                    give_terminal_to(pgid);
+                }
+            }
+            pids.push_back(pid);
+            if (prev_read >= 0) {
+                close(prev_read);  // the child now owns its input end
+            }
+            if (!last) {
+                close(fds[1]);  // MUST close: otherwise the next stage never sees EOF
+                prev_read = fds[0];
+            } else {
+                prev_read = -1;
+            }
         }
 
-        if (pid == 0) {
-            // ---- CHILD ----
-            run_stage(state, commands[i], prev_read, last ? -1 : fds[1],
-                      last ? -1 : fds[0], pipeline.background && i == 0);
-        }
-
-        // ---- PARENT ----
-        pids.push_back(pid);
         if (prev_read >= 0) {
-            close(prev_read);  // the child now owns its input end
+            close(prev_read);  // only left open if the loop stopped early
         }
-        if (!last) {
-            close(fds[1]);  // MUST close: otherwise the next stage never sees EOF
-            prev_read = fds[0];
-        } else {
-            prev_read = -1;
+        if (!pids.empty()) {
+            id = state.jobs.add(pids, pgid, pipeline.text, foreground);
         }
+    }  // SIGCHLD unblocked here; any report that arrived is now delivered
+
+    if (pids.empty()) {
+        return 1;
     }
 
-    if (prev_read >= 0) {
-        close(prev_read);  // only left open if the loop stopped early
-    }
-
-    // Background: do NOT wait. Remember the children in the job table; they
-    // are collected later (see JobTable::notify_done), or they become zombies.
-    if (pipeline.background && !failed) {
-        int id = state.jobs.add(pids, pipeline.text);
+    // Background: do NOT wait. The SIGCHLD handler reaps the children when they
+    // end, and the job table reports it before the next prompt.
+    if (!foreground) {
         std::cout << '[' << id << "] " << pids.back() << std::endl;
-        return 0;
+        return failed ? 1 : 0;
     }
 
-    // Foreground: wait for every stage so none becomes a zombie. The pipeline's status is
-    // the last command's.
-    int status = 0;
-    for (size_t i = 0; i < pids.size(); ++i) {
-        int s = wait_for(pids[i]);
-        if (i + 1 == commands.size()) {
-            status = s;
-        }
-    }
+    // Foreground: wait through the job table. It returns when the job has
+    // finished (its status is the last stage's) or has been stopped (148).
+    int status = state.jobs.run_in_foreground(id, false);
     return failed ? 1 : status;
 }
