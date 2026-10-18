@@ -1,7 +1,9 @@
 // NexusShell - builtins.cpp
-// Phase 3: cd, pwd, echo, exit, clear, help, history, export.
+// Phase 3: cd, pwd, echo, exit, clear, help, history, export. (+ jobs, fg, bg)
 
 #include "builtins.h"
+
+#include "history.h"
 
 #include <algorithm>
 #include <cctype>
@@ -167,7 +169,8 @@ int builtin_help(ShellState&, const Args&) {
         "  pwd               print the current directory\n"
         "  echo [-n] [text]  print text (-n: no trailing newline)\n"
         "  export [NAME=val] set an environment variable (no args: list all)\n"
-        "  history           show commands entered in this session\n"
+        "  history [N|-c]    show the last N commands (all by default); -c clears\n"
+        "                    !! !N !-N !text re-run an earlier command (start of line)\n"
         "  jobs              list jobs (start one in the background with: command &)\n"
         "  fg [%n]           bring a job to the foreground (continues it if stopped)\n"
         "  bg [%n]           continue a stopped job in the background\n"
@@ -182,9 +185,35 @@ int builtin_help(ShellState&, const Args&) {
     return 0;
 }
 
-// history: print every command entered so far, numbered from 1.
-int builtin_history(ShellState& state, const Args&) {
-    for (size_t i = 0; i < state.history.size(); ++i) {
+// history [N]   history -c
+// Numbers are positions in the list, so `!N` refers to the number shown here.
+int builtin_history(ShellState& state, const Args& args) {
+    if (args.size() > 2) {
+        std::cerr << "nexus: history: too many arguments" << std::endl;
+        return 1;
+    }
+
+    size_t first = 0;  // index of the first entry to print
+    if (args.size() == 2) {
+        if (args[1] == "-c") {  // clear memory and the file
+            state.history.clear();
+            if (!state.history_file.empty() && !history_rewrite(state.history_file, {})) {
+                std::cerr << "nexus: history: cannot write " << state.history_file << std::endl;
+                return 1;
+            }
+            return 0;
+        }
+        if (args[1].empty() || args[1].size() > 9 ||
+            args[1].find_first_not_of("0123456789") != std::string::npos) {
+            std::cerr << "nexus: history: " << args[1] << ": numeric argument required"
+                      << std::endl;
+            return 1;
+        }
+        size_t count = static_cast<size_t>(std::stoul(args[1]));  // show the last N
+        first = state.history.size() > count ? state.history.size() - count : 0;
+    }
+
+    for (size_t i = first; i < state.history.size(); ++i) {
         std::cout << std::setw(5) << (i + 1) << "  " << state.history[i] << '\n';
     }
     std::cout.flush();

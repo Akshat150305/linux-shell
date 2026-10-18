@@ -1,10 +1,10 @@
 CXX      := g++
 CXXFLAGS := -Wall -Wextra -std=c++17 -g
 TARGET   := nexusshell
-SRCS     := main.cpp builtins.cpp lexer.cpp parser.cpp redirect.cpp executor.cpp jobs.cpp signals.cpp
+SRCS     := main.cpp builtins.cpp lexer.cpp parser.cpp redirect.cpp executor.cpp jobs.cpp signals.cpp history.cpp input.cpp
 OBJS     := $(SRCS:.cpp=.o)
-HEADERS  := builtins.h lexer.h parser.h redirect.h executor.h jobs.h signals.h
-TEST_BINS := tests/test_lexer tests/test_parser tests/test_jobs
+HEADERS  := builtins.h lexer.h parser.h redirect.h executor.h jobs.h signals.h history.h input.h
+TEST_BINS := tests/test_lexer tests/test_parser tests/test_jobs tests/test_history
 
 all: $(TARGET)
 
@@ -21,6 +21,7 @@ test: $(TEST_BINS)
 	./tests/test_lexer
 	./tests/test_parser
 	./tests/test_jobs
+	./tests/test_history
 
 tests/test_lexer: tests/test_lexer.cpp lexer.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) -I. tests/test_lexer.cpp lexer.cpp -o $@
@@ -31,8 +32,12 @@ tests/test_parser: tests/test_parser.cpp lexer.cpp parser.cpp $(HEADERS)
 tests/test_jobs: tests/test_jobs.cpp jobs.cpp signals.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) -I. tests/test_jobs.cpp jobs.cpp signals.cpp -o $@
 
+tests/test_history: tests/test_history.cpp history.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS) -I. tests/test_history.cpp history.cpp -o $@
+
 test-pty: $(TARGET)
 	python3 tests/test_job_control.py
+	python3 tests/test_line_editing.py
 
 clean:
 	rm -f $(OBJS) $(TARGET) $(TEST_BINS)

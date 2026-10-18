@@ -27,7 +27,7 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 - [x] Phase 6: pipes
 - [x] Phase 7: background jobs (`&`, `jobs`)
 - [x] Phase 8: signals and job control (Ctrl+C, Ctrl+Z, SIGCHLD, `fg`, `bg`)
-- [ ] Phase 9: history (persistent file, polish)
+- [x] Phase 9: history (persistent file, arrow-key recall, `!!`) and a small line editor
 - [ ] Phase 10: Linux-style prompt and UI
 - [ ] Phase 11: testing, docs and polish
 
@@ -35,7 +35,9 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 
 | File | Responsibility |
 |---|---|
-| `main.cpp` | The shell loop: report finished/stopped jobs, read a line (Ctrl+C aware), tokenize, parse, execute |
+| `main.cpp` | The shell loop: report jobs, read a line, expand `!`, record history, tokenize, parse, execute |
+| `input.h` / `input.cpp` | `read_line()`: the line editor (raw-mode `termios`, arrow keys, history recall); plain `getline` when stdin is not a terminal |
+| `history.h` / `history.cpp` | In-memory history rules, the persistent file (`O_APPEND`), `!!` / `!N` / `!text` expansion. Pure functions |
 | `lexer.h` / `lexer.cpp` | `tokenize()`: quotes, escapes, `$VAR`, `~`, operators (`< > >> 2> \| &`), syntax errors. A pure function. |
 | `parser.h` / `parser.cpp` | `parse_pipeline()`: tokens become a `Pipeline` of `Command`s (argv + redirections each) plus a `background` flag |
 | `executor.h` / `executor.cpp` | `execute()`: runs built-ins in-process, forks one child per stage into its own process group, wires `pipe()`s, hands over the terminal, waits through the job table |
@@ -43,8 +45,8 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 | `signals.h` / `signals.cpp` | `SIGCHLD` handler (the single reaper), `SIGINT`/`SIGTSTP` policy, process groups and terminal ownership (`tcsetpgrp`), terminal modes |
 | `redirect.h` / `redirect.cpp` | `open`/`dup2`/`close` redirection: `apply_redirections()` for children, `RedirectScope` for built-ins |
 | `builtins.h` / `builtins.cpp` | `ShellState`, built-in dispatch table, the built-in commands (incl. `jobs`, `fg`, `bg`) |
-| `tests/test_lexer.cpp`, `tests/test_parser.cpp`, `tests/test_jobs.cpp` | Table-driven unit tests (`make test`) |
-| `tests/test_job_control.py` | End-to-end tests on a pseudo-terminal: real Ctrl+C / Ctrl+Z (`make test-pty`, needs `python3`) |
+| `tests/test_lexer.cpp`, `tests/test_parser.cpp`, `tests/test_jobs.cpp`, `tests/test_history.cpp` | Table-driven unit tests (`make test`) |
+| `tests/test_job_control.py`, `tests/test_line_editing.py` | End-to-end tests on a pseudo-terminal: real Ctrl+C / Ctrl+Z, arrow keys, history (`make test-pty`, needs `python3`) |
 | `Makefile` | Build rules |
 
 ## How a line is processed
@@ -265,6 +267,41 @@ Behaviour:
 - Job control is on only when stdin is a terminal. Scripts and pipes (`printf ... | ./nexusshell`) behave like Phase 7: no process groups, `fg`/`bg` say `no job control`, but the `SIGCHLD` reaper is always on, so there are no zombies.
 - Finished background jobs are reaped the instant they end (no more zombies until the next prompt); the `Done` notice still appears before the next prompt.
 
+## History and line editing (Phase 9)
+
+**Persistence** is plain file I/O. Every accepted command is appended to `~/.nexusshell_history`
+(one line each, mode `0600` because command lines can hold secrets) with `open(O_APPEND)` and a single
+`write()`, so a crash loses nothing and two shells can share the file. At startup the last 1000
+lines are loaded; an over-long file is trimmed once. `NEXUSSHELL_HISTFILE` overrides the location.
+The file is only read and written when **stdin is a terminal**: scripts and pipes never touch it.
+
+**Arrow keys need raw input.** In *canonical mode* the kernel collects a whole line and handles
+backspace, so the shell sees nothing until Enter and Up-arrow is just `ESC [ A` text. While reading a
+line, `input.cpp` clears two `termios` flags and takes over:
+
+| Flag / call | Role |
+|---|---|
+| `~ICANON` | deliver every byte at once instead of line by line |
+| `~ECHO` | the kernel stops echoing; the editor prints characters itself |
+| `ISIG` (kept) | Ctrl+C still raises `SIGINT`; Ctrl+Z is still ignored by the shell |
+| `RawMode` (RAII) | puts the old settings back before the command runs, so children never see raw mode |
+| `ppoll()` with SIGINT blocked | no lost wakeup if Ctrl+C arrives between "check the flag" and "sleep" (same idea as `sigsuspend` in Phase 8) |
+| Escape parsing | `ESC [ A/B/C/D` arrows, `ESC [ H/F` and `ESC [ 1~/4~` Home/End, `ESC [ 3~` Delete; a lone ESC times out after 50 ms |
+
+Keys: Left/Right, Home/End, Backspace, Delete, Up/Down (history; the half-typed line is kept as a draft),
+Ctrl+A / E (start / end), Ctrl+B / F (left / right), Ctrl+P / N (up / down), Ctrl+U / K (delete to start / end),
+Ctrl+W (delete word), Ctrl+L (clear screen), Ctrl+D (EOF on an empty line, delete otherwise), Ctrl+C (discard the line).
+
+History rules and commands:
+
+- Blank lines and a repeat of the previous command are not recorded; at most 1000 entries are kept.
+- `history` lists all, `history N` the last N, `history -c` clears memory **and** the file.
+- `!!` (previous), `!N` (command number N), `!-N` (N-th from the end), `!text` (newest command starting with `text`).
+  Text after the reference is kept (`!! | wc -l`). The expanded line is printed before it runs.
+  A reference is recognised **only at the start of the line** (so quotes and `echo !!` are never touched).
+  An unknown event prints `event not found` and runs nothing.
+- Numbers are positions in the current list, so they shift when the oldest entries are dropped.
+
 ## Why built-ins exist
 
 Every process has its own working directory and environment. A forked child gets a
@@ -276,7 +313,7 @@ Every process has its own working directory and environment. A forked child gets
 | `cd` | changes the shell's own directory | `chdir()`, then `getcwd()` + `setenv("PWD"/"OLDPWD")` |
 | `export` | changes the shell's own environment, which children inherit via `execvp` | `setenv()` |
 | `exit` | the shell itself must stop | sets `ShellState::running = false` |
-| `history` | reads the shell's memory | in-memory `vector<string>` |
+| `history` | reads (and `-c` clears) the shell's memory | in-memory `vector<string>`, file `~/.nexusshell_history` |
 | `pwd`, `echo`, `help`, `clear` | could be external, built in for speed and portability | `getcwd()`, `cout`, ANSI escape `ESC[H ESC[2J` |
 
 ## Usage examples
@@ -466,6 +503,21 @@ nexus> exit 3
 - [x] Phase 1-7 behaviour unchanged (redirections, pipes, background, `$?`, no leaked descriptors)
 - [x] Removing the `setpgid` calls makes 9 of the 20 pty tests fail (checked by mutation)
 
+**Phase 9: history and line editing** (`make test`: 55 history cases; `make test-pty`: 26 line-editing cases)
+- [x] Up/Down walk through earlier commands; Down returns to the half-typed line; Up with an empty history does nothing
+- [x] Left/Right, Home/End, Delete, Backspace, Ctrl+A/E/B/F/K/U/W/L/D edit the line; a recalled line can be edited
+- [x] A lone ESC, Tab and unknown control keys are ignored (no hang, no garbage)
+- [x] Ctrl+C discards the typed line and gives a fresh prompt; 60 Ctrl+C presses at the prompt are never lost
+- [x] Ctrl+D on an empty line exits; in the middle of a line it deletes a character
+- [x] The terminal is back in normal mode while a command runs (`stty -a` shows `icanon` and `echo`); removing the restore fails the test (checked by mutation)
+- [x] Commands are saved to the history file (mode 0600) and a new shell recalls them with Up and lists them with `history`
+- [x] `history N`, `history -c` (clears the file too), `history abc` (error)
+- [x] Blank lines and consecutive duplicates are not recorded
+- [x] `!!`, `!N`, `!-N`, `!text`, `!! | cat`; `event not found` for unknown ones; `echo '!!'` and `echo !!` are untouched
+- [x] An over-long history file (1100 lines) is trimmed to 1000 on start
+- [x] Scripts and pipes never create or change the history file; an unwritable history path is not fatal
+- [x] Phase 1-8 behaviour unchanged (all 20 job-control tests still pass on top of the line editor)
+
 ## Known limitations (to be addressed in later phases)
 
 - No `wait` or `kill %1` (the external `kill` takes PIDs); no `%name` job specs; the shell does not `disown` or `SIGHUP` running background jobs on exit
@@ -474,4 +526,5 @@ nexus> exit 3
 - No `2>&1`, `1>`, `2>>`, `&>` or here-documents (`<<`); `2>&1` is rejected with an error
 - No word splitting of expanded values: `X="a b"; echo $X` stays one argument (zsh-style)
 - No `~user`, globbing (`*.cpp`), `$1`-style parameters or `#` comments
-- `history` is in-memory only; no persistence yet (Phase 9)
+- Line editing is byte-based (ASCII): multi-byte UTF-8 characters can misplace the cursor; a line longer than the terminal width repaints imperfectly
+- No Tab completion, no Ctrl+R search, no `!` inside a line, no `$HISTSIZE`

@@ -15,6 +15,7 @@ import select
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 SHELL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nexusshell")
@@ -25,20 +26,35 @@ CTRL_C, CTRL_Z, CTRL_D = "\x03", "\x1a", "\x04"
 class Session:
     """One shell running on a pty."""
 
-    def __init__(self):
+    def __init__(self, histfile=None):
+        # Never touch the real ~/.nexusshell_history: use a throwaway file.
+        self.histfile = histfile or tempfile.mktemp(prefix="nexus_hist_")
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.execv(SHELL, [SHELL])
+            env = dict(os.environ, NEXUSSHELL_HISTFILE=self.histfile)
+            os.execve(SHELL, [SHELL], env)
         self.buf = ""
 
     def send(self, text):
         os.write(self.fd, text.encode())
 
+    def find(self, text):
+        """Index of `text` in the buffer. A prompt only counts at the START of a
+        line: the line editor also repaints "\\r<prompt><text>" while you edit."""
+        if text != PROMPT:
+            return self.buf.find(text)
+        start = 0
+        while True:
+            i = self.buf.find(text, start)
+            if i < 0 or i == 0 or self.buf[i - 1] == "\n":
+                return i
+            start = i + 1
+
     def expect(self, text, timeout=5.0):
         """Wait until `text` appears; return everything before it."""
         end = time.time() + timeout
         while True:
-            i = self.buf.find(text)
+            i = self.find(text)
             if i >= 0:
                 before = self.buf[:i]
                 self.buf = self.buf[i + len(text):]
@@ -72,7 +88,7 @@ class Session:
                              capture_output=True, text=True).stdout
         return [tuple(l.split(None, 2)) for l in out.splitlines() if l.strip()]
 
-    def close(self):
+    def close(self, keep_history=False):
         # Kill the shell's children too, or stopped jobs would outlive the test.
         subprocess.run(["pkill", "-KILL", "-P", str(self.pid)])
         try:
@@ -81,6 +97,8 @@ class Session:
         except OSError:
             pass
         os.close(self.fd)
+        if not keep_history and os.path.exists(self.histfile):
+            os.unlink(self.histfile)
 
 
 def start():

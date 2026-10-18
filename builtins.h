@@ -15,7 +15,8 @@
 struct ShellState {
     bool running = true;                  // main loop runs while this is true
     int last_status = 0;                  // exit status of the last command
-    std::vector<std::string> history;     // every non-blank line entered
+    std::vector<std::string> history;     // commands entered (oldest first)
+    std::string history_file;             // persistent file; empty = not saved (scripts)
     JobTable jobs;                        // foreground and background jobs
     bool exit_warned = false;             // the last command warned about stopped jobs
     bool exit_confirmed = false;          // ...so this `exit` may proceed

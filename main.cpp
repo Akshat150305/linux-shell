@@ -1,24 +1,29 @@
 // NexusShell - main.cpp
-// Phase 8: the shell loop. Before each prompt, report finished or stopped
+// Phase 9: the shell loop. Before each prompt, report finished or stopped
 // jobs; then read a line and:
 //
 //   tokenize()        lexer.cpp     quotes, escapes, $VAR, ~, operators
 //   parse_pipeline()  parser.cpp    tokens -> commands (argv + redirections)
 //   execute()         executor.cpp  built-ins, fork/exec, pipes, background
 //
-// Ctrl+C at the prompt interrupts getline() (SIGINT is handled without
-// SA_RESTART), which is how we tell it apart from Ctrl+D (end of file).
+// read_line() (input.cpp) is a line editor on a terminal. It reports Ctrl+C
+// (Interrupted) and Ctrl+D (Eof) separately. History is loaded from, and each
+// accepted command appended to, ~/.nexusshell_history, but only when stdin is
+// a terminal, so scripts never touch the user's history.
 
 #include "builtins.h"
 #include "executor.h"
+#include "history.h"
+#include "input.h"
 #include "lexer.h"
 #include "parser.h"
 #include "signals.h"
 
-#include <cstdio>
 #include <iostream>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 // The command line as shown by `jobs`: trimmed, without the trailing '&'.
 static std::string job_text(std::string line) {
@@ -37,27 +42,27 @@ int main() {
     ShellState state;
     std::string input;
 
+    if (isatty(STDIN_FILENO)) {
+        state.history_file = history_file_path();
+        if (!state.history_file.empty() && history_load(state.history_file, state.history)) {
+            history_rewrite(state.history_file, state.history);  // file was too long: trim it
+        }
+    }
+
     while (state.running) {
         // --- Report jobs that finished or stopped since the last prompt ---
         state.jobs.notify();
         take_sigint();  // forget a Ctrl+C that arrived while we were not reading
 
         // --- Read ---
-        std::cout << "nexus> ";
-        if (!std::getline(std::cin, input)) {
-            if (take_sigint()) {
-                // Ctrl+C interrupted the read: not end-of-file. Fresh prompt.
-                std::cin.clear();
-                clearerr(stdin);
-                std::cout << std::endl;
-                continue;
-            }
-            std::cout << std::endl;  // Ctrl+D / EOF
+        ReadResult result = read_line("nexus> ", state.history, input);
+        if (result == ReadResult::Interrupted) {
+            continue;  // Ctrl+C: the editor already printed a fresh line
+        }
+        if (result == ReadResult::Eof) {
             if (state.jobs.has_stopped() && !state.exit_warned) {
                 std::cerr << "There are stopped jobs." << std::endl;
                 state.exit_warned = true;  // a second Ctrl+D leaves
-                std::cin.clear();
-                clearerr(stdin);
                 continue;
             }
             break;
@@ -67,7 +72,23 @@ int main() {
         if (input.find_first_not_of(" \t") == std::string::npos) {
             continue;
         }
-        state.history.push_back(input);  // record the raw line, as bash does
+
+        // --- History: expand !! / !N / !text, then record the line ---
+        std::string expanded;
+        std::string history_error;
+        Expansion kind = history_expand(input, state.history, expanded, history_error);
+        if (kind == Expansion::Error) {
+            std::cerr << "nexus: " << history_error << std::endl;
+            state.last_status = 1;
+            continue;
+        }
+        if (kind == Expansion::Expanded) {
+            std::cout << expanded << std::endl;  // show what is about to run
+            input = expanded;
+        }
+        if (history_add(state.history, input) && !state.history_file.empty()) {
+            history_append(state.history_file, input);
+        }
 
         // --- Parse: line -> tokens -> Pipeline ---
         std::vector<Token> tokens;

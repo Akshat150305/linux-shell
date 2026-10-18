@@ -4,3 +4,4 @@ tests/test_lexer
 tests/test_parser
 tests/test_jobs
 __pycache__/
+tests/test_history
