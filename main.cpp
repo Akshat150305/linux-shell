@@ -1,5 +1,5 @@
 // NexusShell - main.cpp
-// Phase 9: the shell loop. Before each prompt, report finished or stopped
+// Phase 10: the shell loop. Before each prompt, report finished or stopped
 // jobs; then read a line and:
 //
 //   tokenize()        lexer.cpp     quotes, escapes, $VAR, ~, operators
@@ -17,6 +17,7 @@
 #include "input.h"
 #include "lexer.h"
 #include "parser.h"
+#include "prompt.h"
 #include "signals.h"
 
 #include <iostream>
@@ -42,7 +43,11 @@ int main() {
     ShellState state;
     std::string input;
 
-    if (isatty(STDIN_FILENO)) {
+    // Interactive = stdin is a terminal. Only then: banner, rich prompt, history
+    // file. Scripts and pipes get the plain "nexus> " prompt and touch nothing.
+    const bool interactive = isatty(STDIN_FILENO);
+    if (interactive) {
+        std::cout << welcome_banner(use_color()) << std::endl;
         state.history_file = history_file_path();
         if (!state.history_file.empty() && history_load(state.history_file, state.history)) {
             history_rewrite(state.history_file, state.history);  // file was too long: trim it
@@ -55,7 +60,8 @@ int main() {
         take_sigint();  // forget a Ctrl+C that arrived while we were not reading
 
         // --- Read ---
-        ReadResult result = read_line("nexus> ", state.history, input);
+        ReadResult result = read_line(interactive ? build_prompt(state.last_status) : "nexus> ",
+                                  state.history, input);
         if (result == ReadResult::Interrupted) {
             continue;  // Ctrl+C: the editor already printed a fresh line
         }

@@ -28,7 +28,7 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 - [x] Phase 7: background jobs (`&`, `jobs`)
 - [x] Phase 8: signals and job control (Ctrl+C, Ctrl+Z, SIGCHLD, `fg`, `bg`)
 - [x] Phase 9: history (persistent file, arrow-key recall, `!!`) and a small line editor
-- [ ] Phase 10: Linux-style prompt and UI
+- [x] Phase 10: Linux-style prompt and UI (`user@host:dir $`, status indicator, banner, colours)
 - [ ] Phase 11: testing, docs and polish
 
 ## Project layout
@@ -37,6 +37,7 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 |---|---|
 | `main.cpp` | The shell loop: report jobs, read a line, expand `!`, record history, tokenize, parse, execute |
 | `input.h` / `input.cpp` | `read_line()`: the line editor (raw-mode `termios`, arrow keys, history recall); plain `getline` when stdin is not a terminal |
+| `prompt.h` / `prompt.cpp` | The prompt (`user@host:dir $`, `~` for $HOME, red `[N]` after a failure), the welcome banner, colour policy. Formatting is a pure function |
 | `history.h` / `history.cpp` | In-memory history rules, the persistent file (`O_APPEND`), `!!` / `!N` / `!text` expansion. Pure functions |
 | `lexer.h` / `lexer.cpp` | `tokenize()`: quotes, escapes, `$VAR`, `~`, operators (`< > >> 2> \| &`), syntax errors. A pure function. |
 | `parser.h` / `parser.cpp` | `parse_pipeline()`: tokens become a `Pipeline` of `Command`s (argv + redirections each) plus a `background` flag |
@@ -46,7 +47,8 @@ Requires Linux, Ubuntu or WSL, g++ 9 or newer, and make.
 | `redirect.h` / `redirect.cpp` | `open`/`dup2`/`close` redirection: `apply_redirections()` for children, `RedirectScope` for built-ins |
 | `builtins.h` / `builtins.cpp` | `ShellState`, built-in dispatch table, the built-in commands (incl. `jobs`, `fg`, `bg`) |
 | `tests/test_lexer.cpp`, `tests/test_parser.cpp`, `tests/test_jobs.cpp`, `tests/test_history.cpp` | Table-driven unit tests (`make test`) |
-| `tests/test_job_control.py`, `tests/test_line_editing.py` | End-to-end tests on a pseudo-terminal: real Ctrl+C / Ctrl+Z, arrow keys, history (`make test-pty`, needs `python3`) |
+| `tests/test_prompt.cpp` | Unit tests for prompt formatting (`make test`) |
+| `tests/test_job_control.py`, `tests/test_line_editing.py`, `tests/test_ui.py` | End-to-end tests on a pseudo-terminal: real Ctrl+C / Ctrl+Z, arrow keys, history, prompt and colours (`make test-pty`, needs `python3`) |
 | `Makefile` | Build rules |
 
 ## How a line is processed
@@ -302,6 +304,38 @@ History rules and commands:
   An unknown event prints `event not found` and runs nothing.
 - Numbers are positions in the current list, so they shift when the oldest entries are dropped.
 
+## Prompt and terminal UI (Phase 10)
+
+On a terminal the shell prints a short banner once and then shows a Linux-style prompt:
+
+```text
+NexusShell 1.0 - a Unix shell written from scratch in C++
+Type 'help' for the built-in commands, 'exit' to leave.
+
+akshat@laptop:~/projects/linux-shell $ false
+[1] akshat@laptop:~/projects/linux-shell $ cd /tmp
+akshat@laptop:/tmp $
+```
+
+| Part | Where it comes from |
+|---|---|
+| `akshat` | `getpwuid(geteuid())`, the account database. `$USER` can be set to anything, so it is not trusted |
+| `laptop` | `gethostname()` |
+| `~/projects/linux-shell` | `getcwd()`; the `$HOME` prefix becomes `~`. `/home/akshatx` is **not** under `/home/akshat`. A deleted working directory shows `?` |
+| `$` or `#` | `#` when the effective user is root |
+| red `[N]` | the exit status of the previous command, shown only when it is not 0 (`[127]` not found, `[130]` Ctrl+C, `[148]` Ctrl+Z). A blank line keeps the previous status |
+
+Colours are ANSI escape sequences (`ESC [ 1;32 m` ... `ESC [ 0 m`). They take no screen columns, which is why the line
+editor can repaint the prompt from column 0 without measuring it. Colour is used only when stdout is a terminal,
+`NO_COLOR` is unset or empty ([no-color.org](https://no-color.org)) and `TERM` is not `dumb`.
+
+**Scripts stay predictable.** When stdin is not a terminal (pipes, `./nexusshell < file`) there is no banner, no history
+file, no colour, and the prompt is the fixed text `nexus> ` (all transcripts in this README that show `nexus> ` come from
+script runs). Error messages everywhere share one format: `nexus: <what went wrong>` on stderr.
+
+`help` now has three groups: the built-in commands, the syntax for running programs (pipes, redirection, `&`, quoting),
+and the keyboard shortcuts.
+
 ## Why built-ins exist
 
 Every process has its own working directory and environment. A forked child gets a
@@ -518,6 +552,21 @@ nexus> exit 3
 - [x] Scripts and pipes never create or change the history file; an unwritable history path is not fatal
 - [x] Phase 1-8 behaviour unchanged (all 20 job-control tests still pass on top of the line editor)
 
+**Phase 10: prompt and terminal UI** (`make test`: 21 prompt cases; `make test-pty`: 21 UI cases)
+- [x] The prompt reads `user@host:dir $`; the user comes from `getpwuid`, not from `$USER`
+- [x] `$HOME` shows as `~` (also `~/sub`); a sibling such as `/home/akshatx` is not abbreviated; directories with spaces work
+- [x] The prompt follows `cd`, `cd -` and `cd` with no argument; a deleted working directory shows `?` and the shell survives
+- [x] `#` for root, `$` otherwise
+- [x] A failed command adds a red `[N]`; it disappears after a success; a blank line keeps the previous status
+- [x] The status is right after Ctrl+C (`[130]`) and Ctrl+Z (`[148]`)
+- [x] Colour on a terminal by default; off with `NO_COLOR=1` and with `TERM=dumb`
+- [x] The banner prints once on a terminal only
+- [x] Scripts get the plain `nexus> ` prompt, no banner and no status indicator
+- [x] `help` lists every built-in and the key groups, and every listed built-in exists (never "command not found")
+- [x] `clear` sends `ESC [ H ESC [ 2 J`
+- [x] Fourteen different failures (unknown command, bad `cd`, unterminated quote, missing redirect target, `fg` without jobs, ...) all print `nexus: ...` on stderr
+- [x] Phase 1-9 behaviour unchanged (job-control and line-editing suites pass against the new prompt)
+
 ## Known limitations (to be addressed in later phases)
 
 - No `wait` or `kill %1` (the external `kill` takes PIDs); no `%name` job specs; the shell does not `disown` or `SIGHUP` running background jobs on exit
@@ -527,4 +576,5 @@ nexus> exit 3
 - No word splitting of expanded values: `X="a b"; echo $X` stays one argument (zsh-style)
 - No `~user`, globbing (`*.cpp`), `$1`-style parameters or `#` comments
 - Line editing is byte-based (ASCII): multi-byte UTF-8 characters can misplace the cursor; a line longer than the terminal width repaints imperfectly
+- The prompt is not configurable (no `$PS1`); the hostname is not shortened at the first dot
 - No Tab completion, no Ctrl+R search, no `!` inside a line, no `$HISTSIZE`

@@ -19,45 +19,48 @@ import tempfile
 import time
 
 SHELL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nexusshell")
+# The interactive prompt is "[status ]user@host:dir $ ". PROMPT is a marker: expect(PROMPT)
+# waits for a prompt at the START of a line (the editor also repaints it mid-line).
 PROMPT = "nexus> "
+PROMPT_RE = re.compile(r"(?:(?<=\n)|^)(?:\[\d+\] )?[^\s@:\n]+@[^\s:\n]+:[^\n]*? [$#] ")
 CTRL_C, CTRL_Z, CTRL_D = "\x03", "\x1a", "\x04"
 
 
 class Session:
     """One shell running on a pty."""
 
-    def __init__(self, histfile=None):
+    def __init__(self, histfile=None, env=None):
         # Never touch the real ~/.nexusshell_history: use a throwaway file.
         self.histfile = histfile or tempfile.mktemp(prefix="nexus_hist_")
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            env = dict(os.environ, NEXUSSHELL_HISTFILE=self.histfile)
-            os.execve(SHELL, [SHELL], env)
+            child_env = dict(os.environ, NEXUSSHELL_HISTFILE=self.histfile, NO_COLOR="1")
+            child_env.update(env or {})
+            os.execve(SHELL, [SHELL], child_env)
         self.buf = ""
+        self.last_match = ""  # the text of the last prompt (or string) expect() matched
 
     def send(self, text):
         os.write(self.fd, text.encode())
 
     def find(self, text):
-        """Index of `text` in the buffer. A prompt only counts at the START of a
-        line: the line editor also repaints "\\r<prompt><text>" while you edit."""
-        if text != PROMPT:
-            return self.buf.find(text)
-        start = 0
-        while True:
-            i = self.buf.find(text, start)
-            if i < 0 or i == 0 or self.buf[i - 1] == "\n":
-                return i
-            start = i + 1
+        """(start, end) of `text` in the buffer, or None. The prompt marker matches the
+        real prompt, and only at the start of a line."""
+        if text == PROMPT:
+            m = PROMPT_RE.search(self.buf)
+            return (m.start(), m.end()) if m else None
+        i = self.buf.find(text)
+        return (i, i + len(text)) if i >= 0 else None
 
     def expect(self, text, timeout=5.0):
         """Wait until `text` appears; return everything before it."""
         end = time.time() + timeout
         while True:
-            i = self.find(text)
-            if i >= 0:
-                before = self.buf[:i]
-                self.buf = self.buf[i + len(text):]
+            hit = self.find(text)
+            if hit:
+                before = self.buf[:hit[0]]
+                self.last_match = self.buf[hit[0]:hit[1]]
+                self.buf = self.buf[hit[1]:]
                 return before
             left = end - time.time()
             if left <= 0:
