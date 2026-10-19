@@ -13,7 +13,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y g++ make python3 procps
+      - name: Show the environment
+        run: |
+          echo "::notice title=environment::$(lsb_release -ds) | $(g++ --version | head -1) | $(python3 --version) | user=$(id -un) host=$(hostname)"
       - name: Build, unit tests, smoke tests, pseudo-terminal tests
-        run: make check
+        run: |
+          make check > check.log 2>&1 || {
+            status=$?
+            grep -E "FAIL|rror|warning|Traceback|timeout" check.log | head -15 | while IFS= read -r line; do
+              echo "::error title=check::${line}"
+            done
+            tail -n 15 check.log
+            exit $status
+          }
+          tail -n 12 check.log
       - name: Same suite under AddressSanitizer and UBSan
         run: make asan
