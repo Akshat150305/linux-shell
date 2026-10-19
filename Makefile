@@ -39,12 +39,25 @@ tests/test_history: tests/test_history.cpp history.cpp $(HEADERS)
 tests/test_prompt: tests/test_prompt.cpp prompt.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) -I. tests/test_prompt.cpp prompt.cpp -o $@
 
+# End-to-end: the real binary through a pipe (smoke) and on a pseudo-terminal (test-pty).
+smoke: $(TARGET)
+	bash tests/smoke.sh ./$(TARGET)
+
 test-pty: $(TARGET)
 	python3 tests/test_job_control.py
 	python3 tests/test_line_editing.py
 	python3 tests/test_ui.py
 
+# Everything: unit tests, smoke tests, pseudo-terminal tests.
+check: all test smoke test-pty
+
+# The same, with AddressSanitizer and UBSan (memory errors, undefined behaviour).
+asan:
+	$(MAKE) clean
+	$(MAKE) CXXFLAGS="$(CXXFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer" check
+	$(MAKE) clean
+
 clean:
 	rm -f $(OBJS) $(TARGET) $(TEST_BINS)
 
-.PHONY: all test test-pty clean
+.PHONY: all test smoke test-pty check asan clean

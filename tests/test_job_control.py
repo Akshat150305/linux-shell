@@ -18,7 +18,9 @@ import sys
 import tempfile
 import time
 
-SHELL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nexusshell")
+# NEXUSSHELL_BIN lets a CMake/CI build point the tests at a binary outside the source tree.
+SHELL = os.environ.get("NEXUSSHELL_BIN") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "nexusshell")
 # The interactive prompt is "[status ]user@host:dir $ ". PROMPT is a marker: expect(PROMPT)
 # waits for a prompt at the START of a line (the editor also repaints it mid-line).
 PROMPT = "nexus> "

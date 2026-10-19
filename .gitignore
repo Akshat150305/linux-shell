@@ -6,3 +6,4 @@ tests/test_jobs
 __pycache__/
 tests/test_history
 tests/test_prompt
+build
