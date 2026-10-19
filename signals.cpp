@@ -124,7 +124,10 @@ void reset_child_signals() {
     // A handler is reset by exec, but SIG_IGN is INHERITED through exec, and a
     // forked built-in never execs. So put every signal we touched back to
     // the default explicitly.
-    const int touched[] = {SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGCHLD};
+    // SIGPIPE too: programs that start the shell (CI runners, Python's subprocess, Node)
+    // often ignore it, and without this `yes | head -1` would print "Broken pipe" errors
+    // instead of the producer quietly dying.
+    const int touched[] = {SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGCHLD, SIGPIPE};
     for (int sig : touched) {
         set_handler(sig, SIG_DFL, 0);
     }

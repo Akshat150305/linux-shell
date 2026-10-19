@@ -360,8 +360,9 @@ def test_children_get_default_signals():
     s = start()
     out = s.run("sh -c 'grep -E \"^Sig(Ign|Cgt)\" /proc/self/status'")
     ign = int(re.search(r"SigIgn:\s*([0-9a-f]+)", out).group(1), 16)
-    # The signals the shell ignores for itself: INT is handled, QUIT/TSTP/TTIN/TTOU ignored.
-    touched = [signal.SIGINT, signal.SIGQUIT, signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU]
+    # Signals the shell changes for itself, plus SIGPIPE (which a parent may have ignored).
+    touched = [signal.SIGINT, signal.SIGQUIT, signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU,
+               signal.SIGPIPE]  # this harness ignores SIGPIPE, so it is a real regression test
     inherited = [int(n) for n in touched if ign & (1 << (int(n) - 1))]
     assert not inherited, "child inherited ignored signals: %r" % inherited
     s.close()

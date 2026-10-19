@@ -57,6 +57,10 @@ check "builtin in a pipe"       'echo hi | cat'                       'hi'
 check "pipe status is last"     'false | true'"${nl}"'echo $?'        '0'
 check "big pipe, no deadlock"   'seq 1 100000 | wc -l'               '100000'
 check "SIGPIPE ends producer"   'yes | head -n 1'                     'y'
+# CI runners and many launchers start programs with SIGPIPE ignored, and ignored signals
+# survive exec. The shell must give its children the default action back.
+actual=$(trap '' PIPE; run 'yes | head -n 1')
+if [ "$actual" == "y" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL  SIGPIPE ignored by the parent: got '$actual'"; fi
 
 # --- background jobs, zombies, descriptors ---
 check "background + Done"       "sleep 0.1 &${nl}sleep 0.4"           "[1] PID${nl}[1]+  Done       sleep 0.1"
