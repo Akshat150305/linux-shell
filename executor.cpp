@@ -15,12 +15,14 @@
 #include "executor.h"
 
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
 
 #include <fcntl.h>
+#include <stdio_ext.h>  // __fpurge (glibc)
 #include <unistd.h>
 
 #include "redirect.h"
@@ -124,7 +126,24 @@ int run_in_shell(ShellState& state, const Command& command) {
     if (command.argv.empty()) {
         return 0;  // `> file`: the file was created/truncated, nothing to run
     }
-    return run_builtin(state, command.argv);
+    int status = run_builtin(state, command.argv);
+
+    // Push the built-in's output out NOW, while the redirection is still in
+    // place, so a failed write (disk full, closed pipe, ...) is noticed here.
+    // Without this the failure would leave std::cout in a permanent error state
+    // and silence every later message the shell prints.
+    bool failed = std::fflush(stdout) != 0;
+    int saved_errno = errno;  // fflush() sets it; printing below could change it
+    failed = failed || std::ferror(stdout) || !std::cout;
+    if (failed) {
+        __fpurge(stdout);   // drop the unsent bytes: they must not reach the real stdout later
+        clearerr(stdout);
+        std::cout.clear();
+        std::cerr << "nexus: " << command.argv[0] << ": write error: "
+                  << std::strerror(saved_errno) << std::endl;
+        return 1;
+    }
+    return status;
 }
 
 // Child side of job control: join the job's process group and, for a

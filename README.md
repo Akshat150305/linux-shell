@@ -22,7 +22,7 @@ what the terminal shows. Run it yourself to regenerate the GIF and `docs/screens
 - **One `SIGCHLD` reaper, no polling:** finished children are collected the instant they exit, so no zombies; the handler only does async-signal-safe work.
 - **A line editor and persistent history** on `termios` raw mode: arrow keys, Ctrl+A/E/K/U/W, `!!`, `~/.nexusshell_history`.
 - **A Linux-style prompt** (`user@host:~/dir $`) with a red exit-status indicator and colours that respect `NO_COLOR`.
-- **404 automated checks** (unit, end-to-end through a pipe, and on a real pseudo-terminal), also run under AddressSanitizer and UBSan in CI.
+- **405 automated checks** (unit, end-to-end through a pipe, and on a real pseudo-terminal), also run under AddressSanitizer and UBSan in CI.
 
 ## Quick start
 
@@ -246,7 +246,7 @@ Exit statuses follow shell convention:
 | `tests/test_jobs.cpp` | no processes: raw `wait()` statuses are fed to the job table | 35 |
 | `tests/test_history.cpp` | no shell: add rules, file I/O, `!` expansion | 55 |
 | `tests/test_prompt.cpp` | no shell: prompt formatting | 21 |
-| `tests/smoke.sh` | the real binary, scripts through a pipe, output compared | 29 |
+| `tests/smoke.sh` | the real binary, scripts through a pipe, output compared | 30 |
 | `tests/test_job_control.py` | the real binary on a **pseudo-terminal**; types real Ctrl+C / Ctrl+Z | 20 |
 | `tests/test_line_editing.py` | pseudo-terminal: arrow keys, editing, history, persistence | 26 |
 | `tests/test_ui.py` | pseudo-terminal: prompt, status indicator, colours, banner, `help`, error format | 21 |

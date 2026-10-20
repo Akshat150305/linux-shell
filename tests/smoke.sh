@@ -50,6 +50,9 @@ check "> and >> and <"          'echo one > $T/f'"${nl}"'echo two >> $T/f'"${nl}
 check "2> captures stderr"      'ls /nonexistent_xyz 2> $T/e'"${nl}"'cat $T/e | wc -l'  '1'
 check "missing input file"      'cat < /nonexistent_xyz'              'nexus: /nonexistent_xyz: No such file or directory'
 check "builtin redirected"      'echo hi > $T/g'"${nl}"'pwd > $T/h'"${nl}"'cat $T/g'    'hi'
+# A built-in whose output cannot be written reports it and the shell carries on
+# (it used to leave std::cout broken and silence everything after).
+check "builtin write error"     'echo hi > /dev/full'"${nl}"'echo status=$?'"${nl}"'echo after'  "nexus: echo: write error: No space left on device${nl}status=1${nl}after"
 
 # --- pipes ---
 check "three-stage pipe"        "echo 'b a c' | tr ' ' '\\n' | sort | head -n 2"  "a${nl}b"
